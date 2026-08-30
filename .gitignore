@@ -1,0 +1,15 @@
+node_modules/
+*.log
+
+# The portal URL and MAC ARE the subscription credentials. Keep them in Portainer's environment
+# variables, never in the repo.
+.env
+profiles.json
+
+# Runtime state: stream ids and cached catalogue. Lives in the Docker volume.
+relay-state.json
+data/
+
+# The old Go project still sits in this directory and carries its own .git. Without this line,
+# git would try to record it as a submodule pointing at a repo nobody else can resolve.
+stalkerhek_plus/

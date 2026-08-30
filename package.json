@@ -1,0 +1,15 @@
+{
+  "name": "stbplayer-relay",
+  "version": "1.0.0",
+  "description": "Shares one Stalker portal session across many devices, re-served as Xtream Codes.",
+  "main": "server.js",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test-relay.js"
+  },
+  "dependencies": {}
+}

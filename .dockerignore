@@ -1,0 +1,16 @@
+# Allowlist, deliberately. An ignore-list here once dropped stalker.js from the image and the
+# container died at startup with MODULE_NOT_FOUND — naming what goes IN makes that impossible.
+*
+!*.js
+!package.json
+
+# ...then take back the things that are .js but must not ship.
+test-relay.js
+
+# Never, under any circumstances — these are the subscription credentials.
+.env
+profiles.json
+
+# The old Go project sits in a subdirectory here. '*' already excludes it, but being explicit
+# means nobody later "helpfully" un-ignores it and ships a second codebase in the image.
+stalkerhek_plus

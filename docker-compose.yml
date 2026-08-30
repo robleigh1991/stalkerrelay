@@ -1,0 +1,54 @@
+# Portainer: Stacks -> Add stack -> Repository, point it at this repo, then set the variables
+# below in Portainer's "Environment variables" section. Nothing secret is committed to the repo.
+services:
+  relay:
+    build:
+      context: .
+    image: stbplayer-relay:latest
+    container_name: stbplayer-relay
+    restart: unless-stopped
+
+    ports:
+      # Host:container. 4700 avoids stalkerhek's 4400/4600 if you're still running it.
+      - "${RELAY_PORT:-4700}:4700"
+
+    environment:
+      # --- the line being shared -------------------------------------------------------------
+      # These two ARE the subscription. Set them in Portainer, not in the repo.
+      RELAY_PORTAL: "${RELAY_PORTAL}"
+      RELAY_MAC: "${RELAY_MAC}"
+
+      # What the provider actually allows concurrently. The relay enforces this itself and returns
+      # a readable 503, instead of letting the portal answer a bare 456 halfway through a film.
+      RELAY_MAX_CONNECTIONS: "${RELAY_MAX_CONNECTIONS:-2}"
+
+      # --- what devices log in with ----------------------------------------------------------
+      # Username is always the MAC above. This is the password.
+      RELAY_PASSWORD: "${RELAY_PASSWORD:-stbplayer}"
+
+      # --- optional ---------------------------------------------------------------------------
+      RELAY_TZ: "${RELAY_TZ:-Europe/London}"
+      # External XMLTV. Leave empty and the relay builds a guide from the portal's own short-EPG.
+      RELAY_EPG_URL: "${RELAY_EPG_URL:-}"
+
+    volumes:
+      # Stream ids persist here. Delete this volume and every saved favourite in every player
+      # points at a different channel.
+      - relay_data:/data
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4700/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+    logging:
+      # A relay that runs for months shouldn't fill the disk with logs.
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  relay_data:

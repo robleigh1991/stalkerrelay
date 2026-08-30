@@ -1,0 +1,59 @@
+# Portainer -> Stacks -> Add stack -> Web editor. Paste this.
+#
+# It pulls a prebuilt image instead of building on the host. That matters because Portainer does
+# not build reliably from the web editor: on a Swarm endpoint `build:` is ignored outright, and
+# even on standalone Docker the git-context build depends on the daemon being able to clone.
+#
+# The image is published by GitHub Actions on every push to main. Make the package public once,
+# under the repo's Packages tab, or Portainer needs registry credentials to pull it.
+#
+# No portal credentials here — lines are added in the dashboard at http://your-host:4700.
+
+services:
+  relay:
+    image: ghcr.io/robleigh1991/stalkerrelay:latest
+    container_name: stalkerrelay
+    restart: unless-stopped
+
+    ports:
+      # Dashboard, and the shared Xtream endpoint where a line is addressed by its MAC.
+      - "4700:4700"
+      # Ports an individual line can claim, chosen per line in the dashboard. Published as a whole
+      # range because Docker cannot add a published port to a running container — without this,
+      # setting a line's port would appear to work and then be unreachable.
+      - "4701-4720:4701-4720"
+
+    environment:
+      # Blank means the relay generates a password on first start and prints it to the container
+      # log. Set a value here to choose your own, or to recover a forgotten one.
+      # Written as a plain value, not ${VAR:-default}: Portainer resolves variables itself and does
+      # not implement shell-style defaults, which is a common reason a stack refuses to deploy.
+      RELAY_ADMIN_PASSWORD: ""
+
+      # Must match the range published above, or a line could claim a port nothing can reach.
+      RELAY_PORT_MIN: "4701"
+      RELAY_PORT_MAX: "4720"
+
+      RELAY_TZ: "Europe/London"
+
+    volumes:
+      # config.json (your lines, and the hashed dashboard password) and relay-state.json (stream
+      # ids). Lose this and you re-add every line, and every favourite saved in every player points
+      # at a different channel.
+      - relay_data:/data
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4700/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  relay_data:

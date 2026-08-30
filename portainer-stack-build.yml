@@ -1,0 +1,29 @@
+# Fallback: builds on the Docker host instead of pulling a published image.
+#
+# Use this only if you'd rather not publish to GHCR. It requires a STANDALONE Docker endpoint —
+# on Swarm, `build:` is silently ignored and the deploy fails looking for an image that was never
+# created. It also requires the daemon to be able to reach github.com.
+#
+# Deliberately minimal: no variable substitution, no healthcheck shell forms, nothing that
+# Portainer's parser handles differently from plain docker compose.
+
+services:
+  relay:
+    build:
+      context: https://github.com/robleigh1991/stalkerrelay.git#main
+    image: stalkerrelay:local
+    container_name: stalkerrelay
+    restart: unless-stopped
+    ports:
+      - "4700:4700"
+      - "4701-4720:4701-4720"
+    environment:
+      RELAY_ADMIN_PASSWORD: ""
+      RELAY_PORT_MIN: "4701"
+      RELAY_PORT_MAX: "4720"
+      RELAY_TZ: "Europe/London"
+    volumes:
+      - relay_data:/data
+
+volumes:
+  relay_data:

@@ -1,6 +1,6 @@
-# STB Player Relay
+# Stalker Relay
 
-One portal, many devices.
+One portal, many devices — with a dashboard to manage it.
 
 ## The problem it solves
 
@@ -17,11 +17,9 @@ It also enforces the line's concurrent-stream limit itself and **fans out shared
 devices watching the same channel is one connection upstream, not two.
 
 ```
-                                  ┌─────────────┐
-   phone  ─┐                      │             │
-   desktop ─┼── Xtream ──▶  relay ─┼── 1 session ─┼──▶  portal
-   TV      ─┘                      │             │
-                                  └─────────────┘
+   phone  ─┐
+   desktop ─┼── Xtream ──▶  relay ── 1 session ──▶  portal
+   TV      ─┘
 ```
 
 ## Deploying with Portainer
@@ -30,96 +28,105 @@ devices watching the same channel is one connection upstream, not two.
 
 | Field | Value |
 |---|---|
-| Repository URL | `https://github.com/robleigh1991/stalkerhek_plus` |
+| Repository URL | `https://github.com/robleigh1991/stalkerrelay` |
 | Reference | `refs/heads/main` |
 | Compose path | `docker-compose.yml` |
 
-Then add these under **Environment variables**:
+Optionally set `RELAY_ADMIN_PASSWORD` under **Environment variables**. If you don't, the relay
+generates one on first start and prints it to the container log:
 
-| Name | Example | Notes |
-|---|---|---|
-| `RELAY_PORTAL` | `http://line.example.net/portal.php` | Portal URL |
-| `RELAY_MAC` | `00:1A:79:F2:B1:5D` | The MAC to share |
-| `RELAY_MAX_CONNECTIONS` | `2` | What your line actually allows |
-| `RELAY_PASSWORD` | *something of your own* | Devices log in with this |
-| `RELAY_PORT` | `4700` | Host port, optional |
-| `RELAY_EPG_URL` | | Optional external XMLTV |
-
-Enable **Automatic updates** if you want Portainer to redeploy when you push.
-
-Credentials go in Portainer, never in the repo — the portal URL and MAC *are* the subscription.
-
-### Or plain compose
-
-```bash
-cp .env.example .env    # fill in portal + mac
-docker compose up -d --build
+```
+[config]   No RELAY_ADMIN_PASSWORD set. Generated one for the dashboard:
+[config]       kR3nP-xQ2vT8
 ```
 
-### Or no Docker at all
+Then open **http://your-host:4700**, sign in, and add your lines. Nothing else needs configuring,
+and no credentials are stored in the repo or the stack file.
+
+### Without Docker
 
 ```bash
-RELAY_PORTAL=http://... RELAY_MAC=00:1A:79:... node server.js
+RELAY_ADMIN_PASSWORD=something node server.js
 ```
 
 Node 18+, no dependencies to install.
 
+## Adding a line
+
+**Add line** in the dashboard. You need the portal URL and the MAC; everything else has a sensible
+default. **Test portal** does a throwaway handshake so a typo is caught here rather than by a player
+failing silently three screens later.
+
+| Field | What it does |
+|---|---|
+| Portal URL | The address your provider gave you |
+| MAC address | The MAC for this line |
+| Max connections | What the line actually allows — the relay enforces it |
+| Dedicated port | Optional; see below |
+| Password | What players use. Generated for you; change it if you like |
+| EPG URL | Optional external XMLTV. Empty builds a guide from the portal |
+
+The test never touches a running line's session, because testing a MAC that is already in use would
+evict it — the exact failure this service exists to prevent.
+
+## One port, or a port each
+
+**Shared port (default).** Everything on 4700. A player picks its line by sending that line's MAC as
+the username. Simple, and nothing extra to publish in Docker.
+
+**Dedicated port.** Give a line a port in 4701–4720 and it gets its own listener. The username then
+doesn't matter — the port already says which line it is. Worth doing when:
+
+- a player struggles with two accounts on the same host and port
+- you want to hand someone a plain server address without explaining MAC addresses
+- you want one line reachable without the others
+
+The whole 4701–4720 range is published by the compose file up front, because Docker cannot add a
+published port to a running container — otherwise choosing a port in the dashboard would need a
+stack redeploy to take effect. Changing a line's port moves its listener immediately; clearing it
+closes the listener and the line stays reachable on the shared port.
+
 ## Pointing devices at it
 
-Any Xtream-capable player — TiviMate, OTT Navigator, VLC, STB Player itself:
+Each line card shows exactly what to type, with copy buttons:
 
-| Field | Value |
-|---|---|
-| Server | `http://<host>:4700` |
-| Username | the **MAC** (`00:1A:79:F2:B1:5D`) |
-| Password | your `RELAY_PASSWORD` |
+| Field | Shared port | Dedicated port |
+|---|---|---|
+| Server | `http://host:4700` | `http://host:4703` |
+| Username | the line's **MAC** | anything |
+| Password | the line's password | the line's password |
 
-Or the playlist directly:
+Works with TiviMate, OTT Navigator, VLC, STB Player and anything else that speaks Xtream. There's a
+playlist URL too, for players that want a list rather than the API.
 
-```
-http://<host>:4700/get.php?username=<MAC>&password=<pass>
-http://<host>:4700/xmltv.php?username=<MAC>&password=<pass>
-```
-
-> **While testing, don't leave another client connected to the same MAC.** It will handshake
-> directly against the portal and evict the relay's session — the exact problem this exists to
-> solve. Quit it, or give the relay its own MAC.
-
-## Sharing several lines
-
-Put a `profiles.json` in the volume (`/data/profiles.json`) and drop `RELAY_PORTAL`/`RELAY_MAC`:
-
-```json
-[
-  { "id": "1", "name": "Main",   "portal": "http://a/portal.php", "mac": "00:1A:79:AA:AA:AA", "maxConnections": 2 },
-  { "id": "2", "name": "Backup", "portal": "http://b/portal.php", "mac": "00:1A:79:BB:BB:BB", "maxConnections": 1 }
-]
-```
-
-Each device logs in with the MAC of the line it wants.
+> **While testing, don't leave another client connected directly to the same MAC.** It will
+> handshake against the portal and evict the relay's session — the exact problem this solves. Point
+> it at the relay, or give the relay its own MAC.
 
 ## Endpoints
 
 | Path | Purpose |
 |---|---|
+| `/` | Dashboard (main port only) |
+| `/api/*` | Management API (main port only, requires sign-in) |
 | `/player_api.php` | Xtream API — live, VOD, series, categories, `get_series_info`, short EPG |
 | `/get.php` | M3U playlist |
 | `/xmltv.php` | EPG as XMLTV |
-| `/live/<mac>/<pass>/<id>.ts` | live stream, fanned out between devices |
-| `/movie/<mac>/<pass>/<id>.mp4` | film, resumable by byte offset |
-| `/series/<mac>/<pass>/<id>.mp4` | episode, resumable by byte offset |
-| `/status` | sessions, connections in use, what's playing |
+| `/live/<user>/<pass>/<id>.ts` | live stream, fanned out between devices |
+| `/movie/<user>/<pass>/<id>.mp4` | film, resumable by byte offset |
+| `/series/<user>/<pass>/<id>.mp4` | episode, resumable by byte offset |
+| `/status` | connection counts — no credentials, no sign-in needed |
 | `/health` | container health check |
 
-`/status` is the one to look at when something seems wrong — it shows the live session, how many
-connections are held, and by whom.
+The management API and dashboard are **not routed at all** on a line's own port. Those are the ports
+most likely to end up forwarded through a router.
 
 ## Behaviour worth knowing
 
 **Stream ids are stable.** They're keyed on the portal command and persisted to
 `/data/relay-state.json`, so favourites survive restarts and a play URL issued an hour ago still
 resolves. Ids do *not* shift when categories are filtered — deriving them from a filtered listing
-is how you end up playing the wrong channel. **Keep the volume**; losing it reissues every id.
+is how you end up playing the wrong channel. **Keep the volume.**
 
 **"All" means all.** `get_live_streams`, `get_vod_streams` and `get_series` with no `category_id`
 return everything. That's how clients ask for a full listing, and answering with an empty array
@@ -140,31 +147,41 @@ released, so channel surfing doesn't spend a slot reopening what you just closed
 
 ## Configuration
 
+Lines live in the dashboard. These are the only environment variables that matter:
+
 | Variable | Default | Meaning |
 |---|---|---|
-| `RELAY_PORT` | `4700` | Listen port |
-| `RELAY_PORTAL` | — | Portal URL (single-line mode) |
-| `RELAY_MAC` | — | MAC (single-line mode) |
-| `RELAY_MAX_CONNECTIONS` | `2` | The line's concurrent-stream cap |
-| `RELAY_PASSWORD` | `stbplayer` | Password devices use |
-| `RELAY_TZ` | `Europe/London` | Portal timezone |
-| `RELAY_EPG_URL` | — | External XMLTV; otherwise built from the portal |
-| `RELAY_PROFILES_FILE` | `/data/profiles.json` | Multi-line config |
+| `RELAY_ADMIN_PASSWORD` | generated | Dashboard password. Set it to override and to recover a lost one |
+| `RELAY_PORT` | `4700` | Dashboard and shared endpoint |
+| `RELAY_PORT_MIN` / `MAX` | `4701` / `4720` | Ports a line may claim; must match what Docker publishes |
+| `RELAY_TZ` | `Europe/London` | Default timezone for new lines |
+| `RELAY_CONFIG_FILE` | `/data/config.json` | Lines and the hashed dashboard password |
 | `RELAY_STATE_FILE` | `/data/relay-state.json` | Persisted stream ids |
+
+`RELAY_PORTAL`, `RELAY_MAC` and `RELAY_PASSWORD` are read **once**, on a first run with no
+configuration, to import an existing single-line setup. After that they're ignored.
+
+## Security
+
+The dashboard can read and write subscription credentials. It is built for a **local network**:
+authentication is one password over plain HTTP, and `config.json` is written 0600 with the admin
+password stored as a scrypt hash.
+
+If you need access from outside, use a VPN rather than forwarding ports. Anyone who reaches a line's
+port can stream it, and anyone who reaches the dashboard can read the portal credentials outright.
 
 ## Tests
 
 ```bash
-node test-relay.js
+node test-relay.js       # session sharing, fan-out, budget, id stability, dropped sources
+node test-dashboard.js   # admin auth, line CRUD, per-line ports and password isolation
 ```
 
-Runs the relay against a mock portal and a mock media origin, covering session sharing, fan-out,
-connection-budget exhaustion, id round-tripping and persistence, "All" listings, live re-open
-through repeated drops, and auth.
+Both run against a mock portal — no real subscription needed.
 
 ## History
 
-This repository previously held **stalkerhek_plus**, a Go fork of
-[stalkerhek](https://github.com/erkexzcx/stalkerhek). That code remains in the git history. The
-relay is a fresh implementation with a different goal: rather than proxying a portal for one client,
-it holds the single session centrally so several devices can share one subscription.
+This started as **stalkerhek_plus**, a Go fork of
+[stalkerhek](https://github.com/erkexzcx/stalkerhek). The relay is a fresh implementation with a
+different goal: rather than proxying a portal for one client, it holds the single session centrally
+so several devices can share one subscription.

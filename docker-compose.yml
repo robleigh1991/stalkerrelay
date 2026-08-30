@@ -1,5 +1,5 @@
-# Portainer: Stacks -> Add stack -> Repository, point it at this repo, then set the variables
-# below in Portainer's "Environment variables" section. Nothing secret is committed to the repo.
+# Portainer: Stacks -> Add stack -> Repository, then set the variables below under
+# "Environment variables". Nothing secret is committed to the repo.
 services:
   relay:
     build:
@@ -9,31 +9,33 @@ services:
     restart: unless-stopped
 
     ports:
-      # Host:container. 4700 avoids stalkerhek's 4400/4600 if you're still running it.
+      # The dashboard, and the shared Xtream endpoint where a line is addressed by its MAC.
       - "${RELAY_PORT:-4700}:4700"
+      # Ports a line can claim for itself. The whole range is published up front because a line's
+      # port is chosen later in the dashboard, and Docker cannot add a published port to a running
+      # container — without this you would have to redeploy the stack to give a line its own port.
+      - "${RELAY_PORT_RANGE:-4701-4720}:4701-4720"
 
     environment:
-      # --- the line being shared -------------------------------------------------------------
-      # These two ARE the subscription. Set them in Portainer, not in the repo.
-      RELAY_PORTAL: "${RELAY_PORTAL}"
-      RELAY_MAC: "${RELAY_MAC}"
+      # Password for the dashboard. Leave it unset and the relay generates one and prints it to the
+      # container log on first start; setting it here is how you recover from a forgotten password.
+      RELAY_ADMIN_PASSWORD: "${RELAY_ADMIN_PASSWORD:-}"
 
-      # What the provider actually allows concurrently. The relay enforces this itself and returns
-      # a readable 503, instead of letting the portal answer a bare 456 halfway through a film.
-      RELAY_MAX_CONNECTIONS: "${RELAY_MAX_CONNECTIONS:-2}"
+      # Lines are managed in the dashboard, not here. These three are read ONCE, on a first run
+      # with no configuration, to import an existing single-line setup — after that they're ignored.
+      RELAY_PORTAL: "${RELAY_PORTAL:-}"
+      RELAY_MAC: "${RELAY_MAC:-}"
+      RELAY_PASSWORD: "${RELAY_PASSWORD:-}"
 
-      # --- what devices log in with ----------------------------------------------------------
-      # Username is always the MAC above. This is the password.
-      RELAY_PASSWORD: "${RELAY_PASSWORD:-stbplayer}"
+      # Must match the published range above, or a line could claim a port nothing can reach.
+      RELAY_PORT_MIN: "${RELAY_PORT_MIN:-4701}"
+      RELAY_PORT_MAX: "${RELAY_PORT_MAX:-4720}"
 
-      # --- optional ---------------------------------------------------------------------------
       RELAY_TZ: "${RELAY_TZ:-Europe/London}"
-      # External XMLTV. Leave empty and the relay builds a guide from the portal's own short-EPG.
-      RELAY_EPG_URL: "${RELAY_EPG_URL:-}"
 
     volumes:
-      # Stream ids persist here. Delete this volume and every saved favourite in every player
-      # points at a different channel.
+      # Holds config.json (your lines) and relay-state.json (stream ids). Losing this means
+      # re-adding every line, and every saved favourite in every player pointing somewhere new.
       - relay_data:/data
 
     healthcheck:
@@ -44,7 +46,6 @@ services:
       retries: 3
 
     logging:
-      # A relay that runs for months shouldn't fill the disk with logs.
       driver: json-file
       options:
         max-size: "10m"

@@ -15,8 +15,26 @@
  *     lives in the catalogue, not in a guess about how the portal names its media.
  */
 const { URL } = require('url');
+const crypto = require('crypto');
 
-const PASSWORD = process.env.RELAY_PASSWORD || 'stbplayer';
+// Fallback only, for a line configured before per-line passwords existed. Anything created through
+// the dashboard carries its own.
+const ENV_PASSWORD = process.env.RELAY_PASSWORD || 'stbplayer';
+
+function passwordOf(session) {
+  return (session && session.cfg && session.cfg.password) || ENV_PASSWORD;
+}
+
+/**
+ * Which line is this request for?
+ *
+ * On a line's own port the answer is fixed — `bound` is that line, and the username is whatever the
+ * player felt like sending. On the shared port the username is the MAC, the way Xtream clients
+ * expect to address a specific account.
+ */
+function sessionFor(pool, bound, user) {
+  return bound || pool.byMac(user);
+}
 
 function json(res, body, status) {
   const s = JSON.stringify(body);
@@ -28,7 +46,13 @@ function json(res, body, status) {
   res.end(s);
 }
 
-function authOk(pass) { return String(pass || '') === PASSWORD; }
+function authOk(session, pass) {
+  const want = passwordOf(session);
+  const got = String(pass == null ? '' : pass);
+  if (got.length !== want.length) return false;
+  // Constant-time: this is the only thing standing between the network and someone's subscription.
+  return crypto.timingSafeEqual(Buffer.from(got), Buffer.from(want));
+}
 
 /** Host the device used to reach us, so generated URLs point back here and not at localhost. */
 function selfBase(req) {
@@ -37,8 +61,8 @@ function selfBase(req) {
   return proto + '://' + (host || 'localhost');
 }
 
-function playUrl(base, user, kind, id, ext) {
-  return base + '/' + kind + '/' + encodeURIComponent(user) + '/' + encodeURIComponent(PASSWORD) +
+function playUrl(base, user, pass, kind, id, ext) {
+  return base + '/' + kind + '/' + encodeURIComponent(user) + '/' + encodeURIComponent(pass) +
     '/' + id + '.' + (ext || 'ts');
 }
 
@@ -122,14 +146,15 @@ function inCategory(items, catId, key) {
 
 // ---- handlers --------------------------------------------------------------------------------
 
-async function playerApi(req, res, url, pool) {
+async function playerApi(req, res, url, pool, bound) {
   const q = url.searchParams;
   const user = q.get('username') || '';
   const pass = q.get('password') || '';
-  const session = pool.byMac(user);
-  if (!session || !authOk(pass)) {
+  const session = sessionFor(pool, bound, user);
+  if (!session || !authOk(session, pass)) {
     return json(res, { user_info: { auth: 0 } }, 401);
   }
+  const password = passwordOf(session);
 
   try {
     await session.ensure();
@@ -142,7 +167,7 @@ async function playerApi(req, res, url, pool) {
   const base = selfBase(req);
   const catId = q.get('category_id');
 
-  if (!action) return json(res, userInfo(session, base, user));
+  if (!action) return json(res, userInfo(session, base, user, password));
 
   switch (action) {
     case 'get_live_categories':
@@ -185,7 +210,7 @@ async function playerApi(req, res, url, pool) {
           custom_sid: '',
           added: '0',
           season: parseInt(sn, 10),
-          direct_source: playUrl(base, user, 'series', e.id, e.container || 'mp4'),
+          direct_source: playUrl(base, user, password, 'series', e.id, e.container || 'mp4'),
         }));
       });
       return json(res, {
@@ -234,12 +259,12 @@ function shortEpgRow(p) {
 
 function b64(s) { return Buffer.from(String(s), 'utf8').toString('base64'); }
 
-function userInfo(session, base, user) {
+function userInfo(session, base, user, password) {
   const host = new URL(base);
   return {
     user_info: {
       username: user,
-      password: PASSWORD,
+      password: password,
       message: '',
       auth: 1,
       status: 'Active',
@@ -264,14 +289,15 @@ function userInfo(session, base, user) {
 }
 
 /** The M3U playlist, for players that want a list rather than the API. */
-async function playlist(req, res, url, pool) {
+async function playlist(req, res, url, pool, bound) {
   const q = url.searchParams;
   const user = q.get('username') || '';
-  const session = pool.byMac(user);
-  if (!session || !authOk(q.get('password'))) {
+  const session = sessionFor(pool, bound, user);
+  if (!session || !authOk(session, q.get('password'))) {
     res.writeHead(401, { 'Content-Type': 'text/plain' });
     return res.end('unauthorized');
   }
+  const password = passwordOf(session);
   await session.ensure();
   const base = selfBase(req);
   const cat = session.catalog;
@@ -280,12 +306,12 @@ async function playlist(req, res, url, pool) {
   (await cat.liveCategories()).forEach((c) => { catsById[String(c.id)] = c.title; });
 
   const lines = ['#EXTM3U url-tvg="' + base + '/xmltv.php?username=' + encodeURIComponent(user) +
-    '&password=' + encodeURIComponent(PASSWORD) + '"'];
+    '&password=' + encodeURIComponent(password) + '"'];
   channels.forEach((ch) => {
     const group = catsById[String(ch.genreId)] || 'Other';
     lines.push('#EXTINF:-1 tvg-id="' + (ch.epgId || '') + '" tvg-name="' + esc(ch.name) +
       '" tvg-logo="' + (ch.logo || '') + '" group-title="' + esc(group) + '",' + (ch.name || ''));
-    lines.push(playUrl(base, user, 'live', ch.streamId, 'ts'));
+    lines.push(playUrl(base, user, password, 'live', ch.streamId, 'ts'));
   });
   const body = lines.join('\n') + '\n';
   res.writeHead(200, {
@@ -297,4 +323,4 @@ async function playlist(req, res, url, pool) {
 
 function esc(s) { return String(s || '').replace(/"/g, "'"); }
 
-module.exports = { playerApi, playlist, selfBase, playUrl, authOk, PASSWORD };
+module.exports = { playerApi, playlist, selfBase, playUrl, authOk, passwordOf, sessionFor };

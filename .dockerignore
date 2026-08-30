@@ -6,6 +6,7 @@
 
 # ...then take back the things that are .js but must not ship.
 test-relay.js
+test-dashboard.js
 
 # Never, under any circumstances — these are the subscription credentials.
 .env

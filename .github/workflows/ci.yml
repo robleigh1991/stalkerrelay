@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # No dependencies, so nothing to install.
+      - name: Syntax check
+        run: for f in *.js; do node --check "$f"; done
+
+      - name: Relay tests
+        run: node test-relay.js
+
+      - name: Dashboard and port tests
+        run: node test-dashboard.js
+
+  image:
+    name: Image builds
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: docker build -t stalkerrelay:ci .
+
+      # Catches a required module missing from the image. The relay listens even with no lines
+      # configured, so it must be started detached and probed rather than run in the foreground.
+      - name: Container starts and answers
+        run: |
+          docker run -d --name ci -p 4700:4700 -e RELAY_ADMIN_PASSWORD=ci-test stalkerrelay:ci
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:4700/health >/dev/null 2>&1; then
+              echo "healthy after ${i}s"
+              docker rm -f ci >/dev/null
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::relay never became healthy"
+          docker logs ci
+          docker rm -f ci >/dev/null
+          exit 1

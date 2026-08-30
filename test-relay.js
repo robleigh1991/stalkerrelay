@@ -142,13 +142,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   process.env.RELAY_MAX_CONNECTIONS = '2';
   process.env.RELAY_PROFILES_FILE = path.join(dir, 'profiles.json');
   process.env.RELAY_STATE_FILE = path.join(dir, 'state.json');
+  process.env.RELAY_CONFIG_FILE = path.join(dir, 'config.json');
+  // Pinned so the dashboard doesn't generate one and print it into the test output.
+  process.env.RELAY_ADMIN_PASSWORD = 'test-admin-password';
 
   const relay = require('./server');
-  const server = http.createServer(relay.handler);
+  // No opts: this listener stands in for the shared dashboard port, where a line is addressed by
+  // its MAC. The env vars above are imported into the config store on first load.
+  const server = http.createServer((req, res) => relay.handler(req, res, null));
   server.headersTimeout = 0; server.requestTimeout = 0; server.timeout = 0;
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const P = server.address().port;
-  relay.applyProfiles();
+  relay.config.load();
+  relay.applyConfig();
   await sleep(300);
 
   const U = 'username=00%3A1A%3A79%3AAA%3ABB%3ACC&password=testpass';

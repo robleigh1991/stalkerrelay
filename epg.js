@@ -12,6 +12,7 @@
  * request otherwise costing a portal round trip per channel.
  */
 const { requestWithRetry } = require('./stream');
+const xtream = require('./xtream');   // shared auth, so every endpoint agrees on who may read what
 
 const CACHE_TTL = 30 * 60 * 1000;
 const cache = new Map();     // sessionId -> { at, body }
@@ -83,11 +84,13 @@ async function buildFromPortal(session) {
   return Buffer.from(out.join('\n'), 'utf8');
 }
 
-async function serve(req, res, url, pool) {
+async function serve(req, res, url, pool, bound) {
   const q = url.searchParams;
   const user = q.get('username') || '';
-  const session = pool.byMac(user);
-  if (!session) {
+  const session = xtream.sessionFor(pool, bound, user);
+  // The password check belongs here too. This endpoint previously authenticated on the username
+  // alone, which meant knowing a MAC was enough to pull down someone's full channel list.
+  if (!session || !xtream.authOk(session, q.get('password'))) {
     res.writeHead(401, { 'Content-Type': 'text/plain' });
     return res.end('unauthorized');
   }

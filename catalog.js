@@ -31,6 +31,11 @@ const PAGE_LIMIT = 5000;
 // portal is shared, and hammering it is how you get rate-limited or disconnected.
 const WARM_GAP_MS = 120;
 
+// How many catalogue pages to fetch at once while the line is idle. The portal serves only
+// ~14 items per page, so a big line is hundreds of pages; fetching several in parallel is the
+// single biggest speed-up. Kept modest — the portal is shared and rate-limited.
+const WARM_CONCURRENCY = 6;
+
 // How long after connecting before warming starts, so the first device request isn't queued behind
 // a full catalogue walk.
 const WARM_DELAY_MS = 3000;
@@ -169,28 +174,92 @@ class Catalog {
   }
 
   async _walkLive(onProgress) {
+    return this._walkPaged('live', onProgress,
+      (page) => this.session.client.getLiveChannels('*', page));
+  }
+
+  // How gentle to be right now. While someone is watching TV through this same line, fall back to
+  // one page at a time with a pause between pages — the old behaviour — so the walk never competes
+  // with a live stream. While the line is idle there is nothing to be polite to, so go full speed:
+  // several pages at once and no gap.
+  _busy() {
+    try { return !!(this.session && this.session.activeConnections > 0); }
+    catch (e) { return false; }
+  }
+  _concurrency() { return this._busy() ? 1 : WARM_CONCURRENCY; }
+  _gap() { return this._busy() ? WARM_GAP_MS : 0; }
+
+  /**
+   * Walk a paginated portal listing into a single de-duplicated array, assigning a stable id to
+   * every item. `fetchPage(page)` resolves to { items, total, perPage }.
+   *
+   * The portal serves only ~14 items per page, so a large line is hundreds of pages. Page 1 is
+   * fetched on its own because it reports `total` — once we know how many pages exist we fan the
+   * rest out `_concurrency()` at a time instead of walking them strictly one after another. Pages
+   * are still DRAINED in page order, so ids are assigned in the same deterministic sequence a
+   * sequential walk would have used and stay stable across refreshes.
+   *
+   * If the portal doesn't report a usable total we can't know where the end is, so we fall back to
+   * the safe sequential walk that stops when a page adds nothing new.
+   */
+  async _walkPaged(kind, onProgress, fetchPage) {
     const out = [];
     const seen = new Set();
-    for (let page = 1; page <= PAGE_LIMIT; page++) {
-      if (this._stopped) break;
-      const r = await this.session.client.getLiveChannels('*', page);
-      const items = (r && r.items) || [];
-      if (!items.length) break;
+    const absorb = (items) => {
       let added = 0;
-      items.forEach((ch) => {
+      (items || []).forEach((it) => {
         // Portals repeat entries across pages; without this the list grows but never completes.
-        const k = String(ch.id || '') + '|' + String(ch.cmd || '');
+        const k = String(it.id || '') + '|' + String(it.cmd || '');
         if (seen.has(k)) return;
         seen.add(k);
-        ch.streamId = this.idFor('live', ch);
-        out.push(ch);
+        it.streamId = this.idFor(kind, it);
+        out.push(it);
         added++;
       });
+      return added;
+    };
+
+    // Page 1 first — it reports the total, and therefore how many pages exist.
+    const first = await fetchPage(1);
+    const firstItems = (first && first.items) || [];
+    if (!firstItems.length) return out;
+    absorb(firstItems);
+    if (onProgress) onProgress(1, out.length);
+
+    const total = (first && first.total) || 0;
+    const perPage = (first && first.perPage) || firstItems.length;
+    if (total && out.length >= total) return out;
+
+    if (total && perPage) {
+      const lastPage = Math.min(Math.ceil(total / perPage), PAGE_LIMIT);
+      for (let start = 2; start <= lastPage; start += this._concurrency()) {
+        if (this._stopped) break;
+        const width = this._concurrency();
+        const batch = [];
+        for (let p = start; p < start + width && p <= lastPage; p++) {
+          batch.push(fetchPage(p).then((r) => ({ p: p, r: r }), () => ({ p: p, r: null })));
+        }
+        const results = (await Promise.all(batch)).sort((a, b) => a.p - b.p);
+        for (let i = 0; i < results.length; i++) {
+          absorb((results[i].r && results[i].r.items) || []);
+        }
+        if (onProgress) onProgress(Math.min(start + width - 1, lastPage), out.length);
+        const gap = this._gap();
+        if (gap) await sleep(gap);
+      }
+      return out;
+    }
+
+    // Portal gave no usable total: walk sequentially until a page adds nothing new.
+    for (let page = 2; page <= PAGE_LIMIT; page++) {
+      if (this._stopped) break;
+      const r = await fetchPage(page);
+      const items = (r && r.items) || [];
+      if (!items.length) break;
+      if (!absorb(items)) break;               // a page adding nothing new is the real end
       if (onProgress) onProgress(page, out.length);
-      if (!added) break;                       // a page adding nothing new is the real end
-      const total = (r && r.total) || 0;
-      if (total && out.length >= total) break;
-      if (onProgress) await sleep(WARM_GAP_MS); // only pace the background walk, never a device
+      const gap = this._gap();
+      if (gap) await sleep(gap);
     }
     return out;
   }
@@ -217,34 +286,9 @@ class Catalog {
   }
 
   async _walkList(kind, cat, onProgress) {
-    const fetchPage = (page) => (kind === 'series'
+    return this._walkPaged(kind, onProgress, (page) => (kind === 'series'
       ? this.session.client.getSeriesList(cat, page, '', 'added')
-      : this.session.client.getVodList(cat, page, '', 'added'));
-
-    const out = [];
-    const seen = new Set();
-    for (let page = 1; page <= PAGE_LIMIT; page++) {
-      if (this._stopped) break;
-      const r = await fetchPage(page);
-      const items = (r && r.items) || [];
-      if (!items.length) break;
-      let added = 0;
-      items.forEach((m) => {
-        const k = String(m.id || '') + '|' + String(m.cmd || '');
-        if (seen.has(k)) return;          // portals repeat entries across pages
-        seen.add(k);
-        m.streamId = this.idFor(kind, m);
-        out.push(m);
-        added++;
-      });
-      if (onProgress) onProgress(page, out.length);
-      // A page that adds nothing new is the real end, whatever `total` claims.
-      if (!added) break;
-      const total = (r && r.total) || 0;
-      if (total && seen.size >= total) break;
-      if (onProgress) await sleep(WARM_GAP_MS);
-    }
-    return out;
+      : this.session.client.getVodList(cat, page, '', 'added')));
   }
 
   // ---- warming --------------------------------------------------------------------------------

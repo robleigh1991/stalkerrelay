@@ -158,7 +158,9 @@ function makeSession(client) {
 
   console.log('\n--- warming builds everything in the background ---');
   {
-    const client = makeClient();
+    // A little latency so warming is observably in-flight when we sample it below. The walk is now
+    // concurrent, so against a zero-latency mock it would finish before the check even runs.
+    const client = makeClient({ latency: 2 });
     const cat = new Catalog(makeSession(client));
     ok('nothing cached to begin with', cat.progress.warming === false && !cat.progress.done);
     const p = cat.warm();

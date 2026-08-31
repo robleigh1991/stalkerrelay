@@ -370,6 +370,21 @@ const PAGE = `<!DOCTYPE html>
     grid.appendChild(kv('Connections', l.status.active + ' / ' + l.maxConnections));
     card.appendChild(grid);
 
+    // Catalogue state. Without this, a line shows "connected" while players still see empty
+    // categories, because the first walk of a big line takes minutes.
+    var c = l.status.catalog;
+    if (c) {
+      var cg = el('div', 'grid');
+      cg.style.marginTop = '12px';
+      cg.appendChild(kv('Channels', c.channels || 0));
+      cg.appendChild(kv('Films', c.films || 0));
+      cg.appendChild(kv('Series', c.series || 0));
+      cg.appendChild(kv('Catalogue', c.warming
+        ? ('building — ' + c.step + ' (' + (c.items || 0) + ')')
+        : (c.error ? c.error : (c.done ? 'ready' : (c.step || 'idle')))));
+      card.appendChild(cg);
+    }
+
     if (l.status.streams && l.status.streams.length) {
       var st = el('div', 'streams');
       st.appendChild(el('div', null, 'Playing now:'));
@@ -407,6 +422,16 @@ const PAGE = `<!DOCTYPE html>
         .then(refresh);
     });
     acts.appendChild(rc);
+
+    var rb = el('button', 'sm', 'Rebuild catalogue');
+    rb.addEventListener('click', function () {
+      rb.disabled = true;
+      api('/api/lines/' + l.id + '/rebuild', { method: 'POST' })
+        .then(function () { toast('Rebuilding in the background'); })
+        .catch(function (e) { toast(e.message); })
+        .then(function () { rb.disabled = false; refresh(); });
+    });
+    acts.appendChild(rb);
 
     acts.appendChild(el('div', 'sp'));
 

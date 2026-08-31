@@ -121,6 +121,38 @@ playlist URL too, for players that want a list rather than the API.
 The management API and dashboard are **not routed at all** on a line's own port. Those are the ports
 most likely to end up forwarded through a router.
 
+## Why it's faster than pointing a player at the portal
+
+Stalker pages; Xtream doesn't.
+
+`get_ordered_list` hands back one page at a time — often 14 items — so a MAG app draws the first
+screen after a single request and fetches more as you scroll. It feels instant however big the line
+is, because it's lazy.
+
+Xtream has no page parameter. `get_live_streams` is defined to return the entire array, so there is
+no way for a player to ask for "the next 50". Anything translating between the two has to walk every
+portal page before it can answer once. For 12,000 channels at 14 per page that's around 850
+sequential requests — which is why, on the old setup, some categories opened instantly and others
+sat there for a minute.
+
+So the relay builds the catalogue **itself**, in the background, a few seconds after connecting. By
+the time a player asks, the answer is already in memory. Specifically:
+
+- **One walk, not one per device.** Concurrent requests for the same list share a single walk
+  instead of each starting their own against a rate-limited portal.
+- **Stale beats spinning.** When a cached list expires, the old copy is returned immediately and
+  refreshed behind the scenes. Nobody waits for a refresh, and a refresh that fails keeps the copy
+  it already had rather than discarding it.
+- **The walk survives restarts.** It's written to `/data/relay-catalog.json`, so a restart doesn't
+  re-walk the portal. Timestamps are preserved, so restored data still refreshes on schedule rather
+  than being frozen at whatever it was.
+- **It ends when the portal says it's done**, not at an arbitrary page number. An earlier cap of 200
+  pages silently truncated a 12,000-channel line to about 2,800 — and the missing channels just
+  looked like content the provider didn't carry.
+
+The dashboard shows channel, film and series counts per line while this is happening, and
+**Rebuild catalogue** forces a refresh when a provider adds content.
+
 ## Behaviour worth knowing
 
 **Stream ids are stable.** They're keyed on the portal command and persisted to
@@ -157,6 +189,7 @@ Lines live in the dashboard. These are the only environment variables that matte
 | `RELAY_TZ` | `Europe/London` | Default timezone for new lines |
 | `RELAY_CONFIG_FILE` | `/data/config.json` | Lines and the hashed dashboard password |
 | `RELAY_STATE_FILE` | `/data/relay-state.json` | Persisted stream ids |
+| `RELAY_CATALOG_FILE` | `/data/relay-catalog.json` | The built catalogue, so restarts don't re-walk |
 
 `RELAY_PORTAL`, `RELAY_MAC` and `RELAY_PASSWORD` are read **once**, on a first run with no
 configuration, to import an existing single-line setup. After that they're ignored.
@@ -175,6 +208,7 @@ port can stream it, and anyone who reaches the dashboard can read the portal cre
 ```bash
 node test-relay.js       # session sharing, fan-out, budget, id stability, dropped sources
 node test-dashboard.js   # admin auth, line CRUD, per-line ports and password isolation
+node test-catalog.js     # warming, single-flight walks, stale-while-revalidate, persistence
 ```
 
 Both run against a mock portal — no real subscription needed.

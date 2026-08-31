@@ -20,17 +20,36 @@
 
 const CATS_TTL = 60 * 60 * 1000;      // categories barely change
 const LIST_TTL = 10 * 60 * 1000;      // listings change when the provider adds content
-const PAGE_LIMIT = 200;               // pages to walk before accepting a partial list
+
+// A safety stop, not an expected limit. The walk normally ends because the portal said how many
+// items there are, or because a page added nothing new. This only catches a portal that pages
+// forever. It was 200, which silently truncated a 12,000-channel line to about 2,800 — the walk
+// stopped early and the missing channels looked like the provider simply didn't carry them.
+const PAGE_LIMIT = 5000;
+
+// Gap between background page requests. Warming must not compete with someone watching TV: the
+// portal is shared, and hammering it is how you get rate-limited or disconnected.
+const WARM_GAP_MS = 120;
+
+// How long after connecting before warming starts, so the first device request isn't queued behind
+// a full catalogue walk.
+const WARM_DELAY_MS = 3000;
 
 class Catalog {
   constructor(session) {
     this.session = session;
     this.cache = new Map();           // key -> { at, value }
+    this.inflight = new Map();        // key -> Promise   (so one walk serves every caller)
 
     // id <-> item. `byId` is what playback resolves against, so it must outlive any single listing.
     this.byId = new Map();            // streamId -> { kind, cmd, name, item }
     this.idByKey = new Map();         // kind|cmd -> streamId  (so ids stay stable across refreshes)
     this.nextId = 1;
+
+    // What the dashboard shows while a first walk is running.
+    this.progress = { warming: false, done: false, step: '', pages: 0, items: 0, error: null };
+    this._warmTimer = null;
+    this._stopped = false;
   }
 
   _get(key, ttl) {
@@ -38,9 +57,61 @@ class Catalog {
     if (!hit || Date.now() - hit.at > ttl) return null;
     return hit.value;
   }
+
+  /** Cached value regardless of age — the basis of serving stale data instead of blocking. */
+  _stale(key) {
+    const hit = this.cache.get(key);
+    return hit ? hit.value : null;
+  }
+
   _put(key, value) { this.cache.set(key, { at: Date.now(), value: value }); return value; }
 
   clear() { this.cache.clear(); }
+
+  stop() {
+    this._stopped = true;
+    if (this._warmTimer) { clearTimeout(this._warmTimer); this._warmTimer = null; }
+  }
+
+  /**
+   * Run `build` for `key`, but only ever once at a time.
+   *
+   * Two devices opening the same category simultaneously used to start two identical page walks —
+   * double the portal requests for the same bytes, on a connection budget that is already the
+   * scarcest thing here.
+   *
+   * When something cached exists but has expired, the stale copy is returned IMMEDIATELY and the
+   * refresh continues in the background. A ten-minute-old channel list is not worth making someone
+   * stare at a spinner for; it is worth refreshing quietly.
+   */
+  _single(key, ttl, build) {
+    const fresh = this._get(key, ttl);
+    if (fresh) return Promise.resolve(fresh);
+
+    let job = this.inflight.get(key);
+    if (!job) {
+      job = Promise.resolve()
+        .then(build)
+        .then((value) => { this._put(key, value); return value; })
+        .catch((e) => {
+          // A failed refresh must not discard a good previous answer.
+          const old = this._stale(key);
+          if (old) {
+            log(this, 'refresh of ' + key + ' failed (' + ((e && e.message) || e) +
+              ') — keeping the previous copy');
+            return old;
+          }
+          throw e;
+        })
+        .then((v) => { this.inflight.delete(key); return v; },
+          (e) => { this.inflight.delete(key); throw e; });
+      this.inflight.set(key, job);
+    }
+
+    const stale = this._stale(key);
+    if (stale) return Promise.resolve(stale);   // serve now, refresh behind
+    return job;
+  }
 
   /**
    * Assign (or recall) the id for an item. Keyed by the portal cmd, so the same channel keeps its
@@ -84,61 +155,68 @@ class Catalog {
 
   // ---- live ------------------------------------------------------------------------------------
 
-  async liveCategories() {
-    const hit = this._get('cats:live', CATS_TTL);
-    if (hit) return hit;
-    const c = await this.session.client.getLiveGenres();
-    return this._put('cats:live', dropAll(c));
+  liveCategories() {
+    return this._single('cats:live', CATS_TTL,
+      () => this.session.client.getLiveGenres().then(dropAll));
   }
 
   /**
    * Every live channel, with ids assigned. Walked once and cached: a device listing "all channels"
    * must not cost a portal page-walk per request.
    */
-  async liveChannels() {
-    const hit = this._get('live:all', LIST_TTL);
-    if (hit) return hit;
+  liveChannels() {
+    return this._single('live:all', LIST_TTL, () => this._walkLive());
+  }
+
+  async _walkLive(onProgress) {
     const out = [];
+    const seen = new Set();
     for (let page = 1; page <= PAGE_LIMIT; page++) {
+      if (this._stopped) break;
       const r = await this.session.client.getLiveChannels('*', page);
       const items = (r && r.items) || [];
       if (!items.length) break;
+      let added = 0;
       items.forEach((ch) => {
+        // Portals repeat entries across pages; without this the list grows but never completes.
+        const k = String(ch.id || '') + '|' + String(ch.cmd || '');
+        if (seen.has(k)) return;
+        seen.add(k);
         ch.streamId = this.idFor('live', ch);
         out.push(ch);
+        added++;
       });
+      if (onProgress) onProgress(page, out.length);
+      if (!added) break;                       // a page adding nothing new is the real end
       const total = (r && r.total) || 0;
       if (total && out.length >= total) break;
+      if (onProgress) await sleep(WARM_GAP_MS); // only pace the background walk, never a device
     }
-    return this._put('live:all', out);
+    return out;
   }
 
   // ---- vod / series ---------------------------------------------------------------------------
 
-  async vodCategories() {
-    const hit = this._get('cats:vod', CATS_TTL);
-    if (hit) return hit;
-    const c = await this.session.client.getVodCategories();
-    return this._put('cats:vod', dropAll(c));
+  vodCategories() {
+    return this._single('cats:vod', CATS_TTL,
+      () => this.session.client.getVodCategories().then(dropAll));
   }
 
-  async seriesCategories() {
-    const hit = this._get('cats:series', CATS_TTL);
-    if (hit) return hit;
-    const c = await this.session.client.getSeriesCategories();
-    return this._put('cats:series', dropAll(c));
+  seriesCategories() {
+    return this._single('cats:series', CATS_TTL,
+      () => this.session.client.getSeriesCategories().then(dropAll));
   }
 
   /**
    * Movies or series in a category. An EMPTY category means everything — that is what an Xtream
    * client sends for "All", and refusing it is what made stalkerhek's Movies and Series look empty.
    */
-  async list(kind, category) {
+  list(kind, category) {
     const cat = category && category !== '*' ? String(category) : '*';
-    const key = kind + ':' + cat;
-    const hit = this._get(key, LIST_TTL);
-    if (hit) return hit;
+    return this._single(kind + ':' + cat, LIST_TTL, () => this._walkList(kind, cat));
+  }
 
+  async _walkList(kind, cat, onProgress) {
     const fetchPage = (page) => (kind === 'series'
       ? this.session.client.getSeriesList(cat, page, '', 'added')
       : this.session.client.getVodList(cat, page, '', 'added'));
@@ -146,6 +224,7 @@ class Catalog {
     const out = [];
     const seen = new Set();
     for (let page = 1; page <= PAGE_LIMIT; page++) {
+      if (this._stopped) break;
       const r = await fetchPage(page);
       const items = (r && r.items) || [];
       if (!items.length) break;
@@ -158,12 +237,111 @@ class Catalog {
         out.push(m);
         added++;
       });
+      if (onProgress) onProgress(page, out.length);
       // A page that adds nothing new is the real end, whatever `total` claims.
       if (!added) break;
       const total = (r && r.total) || 0;
       if (total && seen.size >= total) break;
+      if (onProgress) await sleep(WARM_GAP_MS);
     }
-    return this._put(key, out);
+    return out;
+  }
+
+  // ---- warming --------------------------------------------------------------------------------
+
+  /**
+   * Build the whole catalogue in the background, so no device ever pays for the page walk.
+   *
+   * This is the difference the relay can make that a plain proxy cannot: Xtream has no pagination,
+   * so a client asking for a category expects the entire list in one response. Walking 800 portal
+   * pages while a player waits is why some categories took a minute to open. Doing it here, once,
+   * ahead of time, means the answer is already in memory when the request arrives.
+   *
+   * Deliberately sequential and paced. The portal is a shared, rate-limited resource and someone
+   * may be watching TV through it while this runs.
+   */
+  warmSoon() {
+    if (this._warmTimer || this.progress.warming) return;
+    this._warmTimer = setTimeout(() => {
+      this._warmTimer = null;
+      this.warm().catch(() => {});
+    }, WARM_DELAY_MS);
+    if (this._warmTimer.unref) this._warmTimer.unref();
+  }
+
+  async warm() {
+    if (this.progress.warming || this._stopped) return;
+    this.progress = { warming: true, done: false, step: 'starting', pages: 0, items: 0, error: null };
+    const started = Date.now();
+
+    const step = (name) => { this.progress.step = name; };
+    const onProgress = (pages, items) => {
+      this.progress.pages = pages;
+      this.progress.items = items;
+    };
+
+    try {
+      step('categories');
+      await this.liveCategories().catch(() => []);
+      await this.vodCategories().catch(() => []);
+      await this.seriesCategories().catch(() => []);
+
+      // Live first: it is what someone opens the app to watch.
+      step('live channels');
+      if (!this._get('live:all', LIST_TTL)) {
+        const live = await this._walkLive(onProgress);
+        this._put('live:all', live);
+        log(this, 'warmed ' + live.length + ' live channels');
+      }
+
+      step('films');
+      if (!this._get('vod:*', LIST_TTL)) {
+        const vod = await this._walkList('vod', '*', onProgress);
+        this._put('vod:*', vod);
+        log(this, 'warmed ' + vod.length + ' films');
+      }
+
+      step('series');
+      if (!this._get('series:*', LIST_TTL)) {
+        const series = await this._walkList('series', '*', onProgress);
+        this._put('series:*', series);
+        log(this, 'warmed ' + series.length + ' series');
+      }
+
+      this.progress.done = true;
+      this.progress.step = 'ready';
+      log(this, 'catalogue ready in ' + Math.round((Date.now() - started) / 1000) + 's');
+    } catch (e) {
+      this.progress.error = (e && e.message) || String(e);
+      log(this, 'warming stopped: ' + this.progress.error);
+    } finally {
+      this.progress.warming = false;
+    }
+  }
+
+  /** Everything worth writing to disk so a restart doesn't re-walk the portal. */
+  dumpLists() {
+    const out = {};
+    ['live:all', 'vod:*', 'series:*', 'cats:live', 'cats:vod', 'cats:series'].forEach((k) => {
+      const hit = this.cache.get(k);
+      if (hit) out[k] = { at: hit.at, value: hit.value };
+    });
+    return out;
+  }
+
+  loadLists(saved) {
+    if (!saved) return 0;
+    let n = 0;
+    Object.keys(saved).forEach((k) => {
+      const e = saved[k];
+      if (!e || !e.value) return;
+      // Keep the original timestamp: restoring a day-old catalogue as "fresh" would hide new
+      // content indefinitely. Stale-while-revalidate serves it instantly and refreshes behind.
+      this.cache.set(k, { at: e.at || 0, value: e.value });
+      n++;
+    });
+    if (n) this.progress.step = 'restored from disk';
+    return n;
   }
 
   /** Seasons and episodes for a series, with an id per episode so it can be played. */
@@ -218,6 +396,13 @@ class Catalog {
     }
     return this._put(key, { seasons: seasons, episodes: episodes });
   }
+}
+
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+function log(cat, msg) {
+  try { console.log('[catalog ' + ((cat.session && cat.session.id) || '?') + '] ' + msg); }
+  catch (e) {}
 }
 
 function dropAll(list) {

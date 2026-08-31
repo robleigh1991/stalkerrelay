@@ -26,6 +26,9 @@ jobs:
       - name: Dashboard and port tests
         run: node test-dashboard.js
 
+      - name: Catalogue tests
+        run: node test-catalog.js
+
   publish:
     name: Publish image
     runs-on: ubuntu-latest

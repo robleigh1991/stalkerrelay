@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node server.js",
-    "test": "node test-relay.js"
+    "test": "node test-relay.js && node test-dashboard.js && node test-catalog.js"
   },
   "dependencies": {}
 }

@@ -37,6 +37,11 @@ const ui = require('./ui');
 const PORT = parseInt(process.env.RELAY_PORT, 10) || 4700;
 const STATE_FILE = process.env.RELAY_STATE_FILE || '/data/relay-state.json';
 
+// The built catalogue, kept separately from the id map: it is far larger, changes on a different
+// schedule, and losing it costs only a re-walk, whereas losing ids breaks saved favourites.
+const CATALOG_FILE = process.env.RELAY_CATALOG_FILE ||
+  path.join(path.dirname(STATE_FILE), 'relay-catalog.json');
+
 const pool = new SessionPool();
 const config = new Config();
 
@@ -59,9 +64,15 @@ function applyConfig() {
     if (!s.catalog) s.catalog = new Catalog(s);
     // Connect eagerly: the portal session is the scarce resource, so it is established once at
     // start rather than during someone's first channel change.
-    s.connect().catch(() => {});
+    s.connect().then(() => {
+      // Then build the catalogue in the background. Xtream has no pagination, so a client asking
+      // for a category expects the whole list at once; walking the portal's pages while a player
+      // waits is what made some categories take a minute to open.
+      s.catalog.warmSoon();
+    }).catch(() => {});
   });
   hydrateState();
+  hydrateCatalogs();
   syncLineServers(lines);
   return sessions;
 }
@@ -130,6 +141,35 @@ function hydrateState() {
   });
 }
 
+/**
+ * Restore the built catalogue. Timestamps are preserved, so anything older than its TTL is served
+ * immediately and refreshed in the background rather than being treated as current — a restart
+ * should cost nobody a page walk, but it should not freeze the listing at whatever it was either.
+ */
+function hydrateCatalogs() {
+  let saved = null;
+  try { saved = JSON.parse(fs.readFileSync(CATALOG_FILE, 'utf8')); } catch (e) { return; }
+  let restored = 0;
+  pool.list().forEach((s) => {
+    const mine = saved && saved[s.id];
+    if (mine && s.catalog) restored += s.catalog.loadLists(mine);
+  });
+  if (restored) log('catalogue restored from disk');
+}
+
+function saveCatalogs() {
+  const out = {};
+  pool.list().forEach((s) => { if (s.catalog) out[s.id] = s.catalog.dumpLists(); });
+  const tmp = CATALOG_FILE + '.tmp';
+  try {
+    fs.mkdirSync(path.dirname(CATALOG_FILE), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(out));
+    fs.renameSync(tmp, CATALOG_FILE);
+  } catch (e) {
+    log('could not save catalogue: ' + ((e && e.message) || e));
+  }
+}
+
 let saveTimer = null;
 function saveStateSoon() {
   if (saveTimer) clearTimeout(saveTimer);
@@ -174,7 +214,10 @@ async function handlePlay(req, res, kind, parts, bound) {
   const streamId = idPart.replace(/\.[a-z0-9]+$/i, '');
 
   const session = xtream.sessionFor(pool, bound, user);
-  if (!session || !xtream.authOk(session, pass)) return text(res, 401, 'unauthorized');
+  if (!session || !xtream.authOk(session, pass)) {
+    xtream.logDenial(pool, bound, user, 'playback');
+    return text(res, 401, 'unauthorized');
+  }
 
   try { await session.ensure(); }
   catch (e) { return text(res, 503, 'portal unavailable: ' + ((e && e.message) || e)); }
@@ -352,6 +395,8 @@ function start() {
 
   // Ids change as catalogues are walked; persist them periodically rather than on every write.
   setInterval(saveStateSoon, 60000).unref();
+  // The catalogue is bigger and changes less often, so it is written less frequently.
+  setInterval(saveCatalogs, 5 * 60000).unref();
 
   const server = tuneForStreaming(http.createServer((req, res) => handler(req, res, null)));
   server.listen(PORT, '0.0.0.0', () => {
@@ -361,6 +406,9 @@ function start() {
   const shutdown = () => {
     log('shutting down');
     saveState();
+    saveCatalogs();
+    // Stop mid-walk rather than holding the container open for a catalogue nobody is waiting for.
+    pool.list().forEach((s) => { if (s.catalog) s.catalog.stop(); });
     pool.stopAll();
     for (const entry of lineServers.values()) { try { entry.server.close(); } catch (e) {} }
     server.close(() => process.exit(0));
@@ -375,4 +423,5 @@ if (require.main === module) start();
 
 module.exports = {
   start, handler, pool, config, applyConfig, lineServers, listenForLine, tuneForStreaming,
+  saveCatalogs, hydrateCatalogs,
 };

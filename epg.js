@@ -91,6 +91,7 @@ async function serve(req, res, url, pool, bound) {
   // The password check belongs here too. This endpoint previously authenticated on the username
   // alone, which meant knowing a MAC was enough to pull down someone's full channel list.
   if (!session || !xtream.authOk(session, q.get('password'))) {
+    xtream.logDenial(pool, bound, user, 'xmltv');
     res.writeHead(401, { 'Content-Type': 'text/plain' });
     return res.end('unauthorized');
   }

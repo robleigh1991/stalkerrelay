@@ -131,8 +131,23 @@ function lineView(line, session) {
       // [{ key, viewers }] — a fanned-out channel shows one entry with several viewers, which is
       // the number that explains why the connection count is lower than the device count.
       streams: session.status().streams,
-    } : { connected: false, error: 'not started', active: 0, streams: [] },
+      // Catalogue build progress. A first walk of a large line takes minutes; without this the
+      // dashboard looks connected while players still see empty categories.
+      catalog: session.catalog ? Object.assign({}, session.catalog.progress, {
+        channels: countOf(session.catalog, 'live:all'),
+        films: countOf(session.catalog, 'vod:*'),
+        series: countOf(session.catalog, 'series:*'),
+      }) : null,
+    } : { connected: false, error: 'not started', active: 0, streams: [], catalog: null },
   };
+}
+
+/** How many items are cached under a key, whatever their age. */
+function countOf(catalog, key) {
+  try {
+    const v = catalog._stale(key);
+    return Array.isArray(v) ? v.length : 0;
+  } catch (e) { return 0; }
 }
 
 // ---- routes ----------------------------------------------------------------------------------
@@ -216,6 +231,17 @@ async function handle(req, res, url, ctx) {
       log('line removed');
       return send(res, 200, { ok: true });
     }
+  }
+
+  // Force a catalogue rebuild, for when a provider has added content and you'd rather not wait
+  // for the cache to expire on its own.
+  const rebuild = p.match(/^\/api\/lines\/([A-Za-z0-9_-]+)\/rebuild$/);
+  if (rebuild && method === 'POST') {
+    const s = pool.get(rebuild[1]);
+    if (!s || !s.catalog) return send(res, 404, { error: 'That line is not running' });
+    s.catalog.clear();
+    s.catalog.warm().catch(() => {});      // deliberately not awaited: this takes minutes
+    return send(res, 200, { ok: true });
   }
 
   // Reconnect a single line, for when a portal has dropped it and you'd rather not restart

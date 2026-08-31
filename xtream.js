@@ -36,6 +36,27 @@ function sessionFor(pool, bound, user) {
   return bound || pool.byMac(user);
 }
 
+/**
+ * Say out loud why a request was refused.
+ *
+ * A player only ever shows "HTTP 401", which is true and useless — a wrong username and a wrong
+ * password look identical from the sofa. The response stays deliberately vague so the network
+ * can't be used to enumerate which MACs exist; the specific reason goes to the container log,
+ * where the person who can act on it is the only one reading.
+ */
+function logDenial(pool, bound, user, where) {
+  try {
+    if (!bound && !pool.byMac(user)) {
+      const known = pool.list().map((s) => s.cfg.mac).filter(Boolean);
+      console.log('[relay] ' + where + ': refused username "' + user + '" — no line has that MAC. ' +
+        (known.length ? 'Configured: ' + known.join(', ') : 'No lines are configured.'));
+    } else {
+      console.log('[relay] ' + where + ': refused — wrong password for "' +
+        ((bound && bound.name) || user) + '"');
+    }
+  } catch (e) {}
+}
+
 function json(res, body, status) {
   const s = JSON.stringify(body);
   res.writeHead(status || 200, {
@@ -152,7 +173,8 @@ async function playerApi(req, res, url, pool, bound) {
   const pass = q.get('password') || '';
   const session = sessionFor(pool, bound, user);
   if (!session || !authOk(session, pass)) {
-    return json(res, { user_info: { auth: 0 } }, 401);
+    logDenial(pool, bound, user, 'player_api');
+    return json(res, { user_info: { auth: 0, message: 'Wrong username or password' } }, 401);
   }
   const password = passwordOf(session);
 
@@ -294,6 +316,7 @@ async function playlist(req, res, url, pool, bound) {
   const user = q.get('username') || '';
   const session = sessionFor(pool, bound, user);
   if (!session || !authOk(session, q.get('password'))) {
+    logDenial(pool, bound, user, 'playlist');
     res.writeHead(401, { 'Content-Type': 'text/plain' });
     return res.end('unauthorized');
   }
@@ -323,4 +346,6 @@ async function playlist(req, res, url, pool, bound) {
 
 function esc(s) { return String(s || '').replace(/"/g, "'"); }
 
-module.exports = { playerApi, playlist, selfBase, playUrl, authOk, passwordOf, sessionFor };
+module.exports = {
+  playerApi, playlist, selfBase, playUrl, authOk, passwordOf, sessionFor, logDenial,
+};

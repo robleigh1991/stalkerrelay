@@ -239,7 +239,7 @@ async function handlePlay(req, res, kind, parts, bound) {
         await b.start();
         b.close = b.close.bind(b);
         return b;
-      });
+      }, { label: entry.name || ('#' + streamId), kind: 'live' });
     } catch (e) {
       if (e && e.busy) return text(res, 503, e.message);
       return text(res, 502, 'could not start stream: ' + ((e && e.message) || e));
@@ -268,13 +268,22 @@ async function handlePlay(req, res, kind, parts, bound) {
     return;
   }
 
-  // FILE: not shared — two people watching the same film are at different points, and a file has a
-  // real byte offset to resume from.
+  // FILE: one slot per viewer, not per request.
+  //
+  // Two people watching the same film ARE two connections — they're at different offsets, so the
+  // bytes can't be shared the way a live channel's can. But one player commonly opens several
+  // overlapping range requests for a single film (seeking, buffering ahead, a fresh request per
+  // scrub), and keying the lease by time made each of those its own connection. A couple of seeks
+  // and someone had eaten the whole line by themselves.
+  //
+  // Keying by viewer instead means those requests join one lease: the count reflects who is
+  // watching, which is what the provider is actually counting.
+  const viewer = (req.socket && req.socket.remoteAddress) || 'unknown';
   let lease;
   try {
-    lease = await session.lease('file:' + streamId + ':' + Date.now(), async () => ({
+    lease = await session.lease('file:' + streamId + ':' + viewer, async () => ({
       close: () => {},
-    }));
+    }), { label: entry.name || ('#' + streamId), kind: entry.kind });
   } catch (e) {
     if (e && e.busy) return text(res, 503, e.message);
     return text(res, 502, (e && e.message) || 'could not start stream');

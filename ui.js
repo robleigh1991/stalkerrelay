@@ -389,8 +389,11 @@ const PAGE = `<!DOCTYPE html>
       var st = el('div', 'streams');
       st.appendChild(el('div', null, 'Playing now:'));
       l.status.streams.forEach(function (s) {
-        st.appendChild(el('div', null, '  ' + s.key + '  (' + s.viewers +
-          (s.viewers === 1 ? ' viewer)' : ' viewers)')));
+        // The name, not the internal lease key — "BBC One", not "live:18236".
+        var line = '  ' + (s.kind === 'live' ? '● ' : '▶ ') + (s.label || s.key);
+        if (s.viewers > 1) line += '  (' + s.viewers + ' viewers)';
+        if (s.since) line += '  ' + ago(s.since);
+        st.appendChild(el('div', null, line));
       });
       card.appendChild(st);
     }
@@ -460,6 +463,13 @@ const PAGE = `<!DOCTYPE html>
 
   function hostOf(u) {
     try { return new URL(u).host; } catch (e) { return u || ''; }
+  }
+
+  function ago(ts) {
+    var s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.floor(s / 60) + 'm';
+    return Math.floor(s / 3600) + 'h' + (Math.floor(s / 60) % 60) + 'm';
   }
 
   // ---- add / edit --------------------------------------------------------------------------

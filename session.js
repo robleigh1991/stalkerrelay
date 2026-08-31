@@ -115,14 +115,15 @@ class Session {
    * `open()` is only called for a genuinely new stream, and only if the budget allows.
    * Returns { upstream, release } or throws a .busy error the caller can turn into a clear message.
    */
-  async lease(key, open) {
+  async lease(key, open, meta) {
     key = String(key);
     let lease = this.leases.get(key);
 
     if (lease) {
       lease.refs++;
       if (lease.closeTimer) { clearTimeout(lease.closeTimer); lease.closeTimer = null; }
-      log(this, 'lease join ' + key + ' (viewers=' + lease.refs + ')');
+      log(this, 'lease join ' + ((lease.meta && lease.meta.label) || key) +
+        ' (viewers=' + lease.refs + ')');
       return { upstream: lease.upstream, release: () => this._release(key), shared: true };
     }
 
@@ -135,7 +136,12 @@ class Session {
     }
 
     // Reserve the slot BEFORE awaiting, or two simultaneous requests both see room and overshoot.
-    lease = { key: key, refs: 1, upstream: null, closeTimer: null };
+    lease = {
+      key: key, refs: 1, upstream: null, closeTimer: null,
+      // What a human should be told is playing — "BBC One", not "live:18236".
+      meta: meta || null,
+      at: Date.now(),
+    };
     this.leases.set(key, lease);
     try {
       lease.upstream = await open();
@@ -143,7 +149,8 @@ class Session {
       this.leases.delete(key);
       throw e;
     }
-    log(this, 'lease open ' + key + ' (' + this.leases.size + '/' + this.maxConnections + ')');
+    log(this, 'lease open ' + ((meta && meta.label) || key) +
+      ' (' + this.leases.size + '/' + this.maxConnections + ')');
     return { upstream: lease.upstream, release: () => this._release(key), shared: false };
   }
 
@@ -179,7 +186,13 @@ class Session {
       error: this.lastError,
       connections: this.activeConnections,
       maxConnections: this.maxConnections,
-      streams: Array.from(this.leases.values()).map((l) => ({ key: l.key, viewers: l.refs })),
+      streams: Array.from(this.leases.values()).map((l) => ({
+        key: l.key,
+        viewers: l.refs,
+        label: (l.meta && l.meta.label) || l.key,
+        kind: (l.meta && l.meta.kind) || (l.key.indexOf('live:') === 0 ? 'live' : 'file'),
+        since: l.at || null,
+      })),
     };
   }
 }

@@ -185,7 +185,12 @@ class Broadcast {
     this.upstream = res;
     this._openedAt = Date.now();
     this._bytesThisOpen = 0;
+    this._sample = '';
     res.on('data', (c) => {
+      // Capture the first bytes so a stillborn open can be explained — a "stream" that is really a
+      // 90-byte refusal ("max connections", an error page, an empty playlist) tells us what the
+      // source is actually saying instead of leaving it a mystery.
+      if (this._sample.length < 200) this._sample += c.toString('latin1').slice(0, 200 - this._sample.length);
       this._bytesThisOpen += c.length;
       // A stream that has run healthily for a while is not "resuming" — forgive earlier churn so a
       // long-lived channel never slowly accumulates toward the give-up cap.
@@ -213,8 +218,9 @@ class Broadcast {
         if (this.resumes >= RESUME_MAX) { log('giving up after ' + this.resumes + ' re-opens'); return this.close(); }
         this.resumes++;
         const wait = STILLBORN_BACKOFF[Math.min(this.resumes - 1, STILLBORN_BACKOFF.length - 1)];
+        const sample = (this._sample || '').replace(/\s+/g, ' ').trim().slice(0, 120);
         log('upstream ' + why + ' after ' + this._bytesThisOpen + 'B/' + aliveMs + 'ms — contention, backing off ' +
-          wait + 'ms (' + this.resumes + '/' + RESUME_MAX + ')');
+          wait + 'ms (' + this.resumes + '/' + RESUME_MAX + ')' + (sample ? ' | source said: ' + sample : ''));
         return setTimeout(() => { if (!this.closed && this.viewers.size) this._reopen(why, 1); }, wait);
       }
       this._reopen(why);

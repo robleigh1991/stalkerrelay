@@ -35,7 +35,10 @@ const RETRY_5XX = [400, 1200, 2500, 4000];
 // re-opening instantly, which would machine-gun the line and ping-pong two channels into killing
 // each other. A stream that runs past HEALTHY_MS/BYTES is healthy and resets the resume counter.
 const MIN_ALIVE_MS = 4000;
-const MIN_ALIVE_BYTES = 64 * 1024;
+// Eviction = a re-open that dies almost instantly having delivered essentially nothing. Keep this
+// small: a source that handed over even a modest chunk before dropping is healthy churn and must be
+// re-opened at once, not throttled. (Too high and normal fast-cycling live gets starved.)
+const MIN_ALIVE_BYTES = 4 * 1024;
 const STILLBORN_BACKOFF = [500, 1000, 2000, 4000, 8000];
 // Live sources here hand out ~20s of stream per play_token then end cleanly. Each segment IS a
 // healthy run, so the reset must fire inside one segment or the resume counter marches to the cap
@@ -201,10 +204,12 @@ class Broadcast {
       if (this.closed) return;
       res.removeAllListeners();
       const aliveMs = Date.now() - (this._openedAt || Date.now());
-      // Died almost immediately with little data: another stream on this line evicted it, or the
-      // source dropped us. Re-opening instantly machine-guns the line and, with two channels open,
-      // ping-pongs them into mutual eviction. Back off, escalating, so the line can settle.
-      if ((aliveMs < MIN_ALIVE_MS || this._bytesThisOpen < MIN_ALIVE_BYTES) && this.viewers.size) {
+      // Died almost immediately AND delivered almost nothing: a genuine eviction (another stream on
+      // this line took the slot), not a normal fast-cycling source. Re-opening instantly machine-guns
+      // the line and ping-pongs two channels into mutual eviction, so back off. A source that handed
+      // over a real chunk before dropping is healthy churn — re-open it at once (both conditions must
+      // hold, or a short-lived-but-productive stream gets throttled and starves the viewer).
+      if (aliveMs < MIN_ALIVE_MS && this._bytesThisOpen < MIN_ALIVE_BYTES && this.viewers.size) {
         if (this.resumes >= RESUME_MAX) { log('giving up after ' + this.resumes + ' re-opens'); return this.close(); }
         this.resumes++;
         const wait = STILLBORN_BACKOFF[Math.min(this.resumes - 1, STILLBORN_BACKOFF.length - 1)];
@@ -234,36 +239,40 @@ class Broadcast {
     if (tries === 0) this.resumes++;
     log('upstream ' + why + ' — re-opening (' + this.resumes + '/' + RESUME_MAX + ', viewers=' + this.viewers.size + ')');
 
-    const attempt = (target) => {
+    const scheduleBackoff = () => {
+      if (tries < REOPEN_BACKOFF.length) {
+        return setTimeout(() => this._reopen(why, tries + 1), REOPEN_BACKOFF[tries]);
+      }
+      log('source will not come back');
+      return this.close();
+    };
+
+    // Try the current URL first — a drop usually just needs re-opening, and the token is often still
+    // valid, so this stays instant (no portal round-trip). Only if the re-open FAILS do we assume the
+    // play_token expired and mint a fresh one, retrying once before backing off. `refreshed` guards
+    // against looping, and we re-check viewers after the await so we never reconnect for nobody.
+    const attempt = (target, refreshed) => {
       requestWithRetry(target, this.headers, {}, (err, res) => {
         if (this.closed) { if (res) res.destroy(); return; }
         if (err || !res || res.statusCode >= 400) {
           if (res) res.resume();
-          if (tries < REOPEN_BACKOFF.length) {
-            return setTimeout(() => this._reopen(why, tries + 1), REOPEN_BACKOFF[tries]);
+          if (this.refresh && !refreshed) {
+            log('re-open failed — minting a fresh play_token (viewers=' + this.viewers.size + ')');
+            return this.refresh()
+              .then((u) => {
+                if (this.closed || !this.viewers.size) { log('refresh done but no viewers — stopping'); return this.close(); }
+                if (u) this.target = u;
+                attempt(this.target, true);
+              })
+              .catch(() => { if (!this.closed && this.viewers.size) scheduleBackoff(); else this.close(); });
           }
-          log('source will not come back');
-          return this.close();
+          return scheduleBackoff();
         }
         this._attachUpstream(res);
       });
     };
 
-    // Mint a fresh play_token for each re-open when we can — the old one is why the source ended.
-    // Re-check closed/viewers AFTER the await: the last viewer can leave while create_link is in
-    // flight, and opening a fresh upstream for nobody is exactly the idle-reconnect leak.
-    if (this.refresh) {
-      log('refreshing play_token (viewers=' + this.viewers.size + ')');
-      this.refresh()
-        .then((u) => {
-          if (this.closed || !this.viewers.size) { log('refresh done but no viewers — stopping'); return this.close(); }
-          if (u) this.target = u;
-          attempt(this.target);
-        })
-        .catch(() => { if (!this.closed && this.viewers.size) attempt(this.target); else this.close(); });
-    } else {
-      attempt(this.target);
-    }
+    attempt(this.target, false);
   }
 
   addViewer(stream) { this.viewers.add(stream); log('viewer added (viewers=' + this.viewers.size + ')'); }

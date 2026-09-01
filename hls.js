@@ -33,6 +33,7 @@ class HlsSession {
     this.key = key;
     this.broadcast = null;       // = lease.upstream, set by the manager before start()
     this.lease = null;           // the session's connection lease, so HLS shows in "Playing now"
+    this.makeLease = null;       // factory to re-lease a fresh source if the broadcast dies
     this.dir = path.join(HLS_ROOT, key.replace(/[^a-zA-Z0-9_-]/g, '_'));
     this.ff = null;
     this.input = null;
@@ -92,11 +93,8 @@ class HlsSession {
     const onExit = (why) => {
       if (this.closed) return;
       log('ffmpeg exited (' + why + ') for ' + this.key);
-      try { this.broadcast.removeViewer(this.input); } catch (e) {}
+      try { if (this.broadcast) this.broadcast.removeViewer(this.input); } catch (e) {}
       this.ff = null;
-      // If the source is gone, restarting ffmpeg onto a dead broadcast just produces a static
-      // playlist the phone loops forever — close instead, so the next request rebuilds cleanly.
-      if (this.broadcast.closed) { log('broadcast gone — closing ' + this.key); return this.close(); }
       this._segBase += 100000;   // continue segment numbers past anything already written
       this._scheduleRestart();
     };
@@ -104,11 +102,33 @@ class HlsSession {
     ff.on('error', (e) => onExit((e && e.code) || 'error'));
   }
 
+  // Heal, don't give up. While the phone is still pulling (touched recently) we keep the stream
+  // alive through any source hiccup — respawning ffmpeg, and re-leasing a FRESH source if the old
+  // broadcast died — so the playlist never freezes into a loop. Only genuine idle (the phone left)
+  // is closed, by the GC. Giving up mid-watch is exactly what made it replay the last window.
   _scheduleRestart() {
     if (this.closed || this._restartTimer) return;
+    if (Date.now() - this.lastAccess > IDLE_MS) { log('idle — closing ' + this.key); return this.close(); }
     this._restarts++;
-    if (this._restarts > 12) { log('giving up after ' + this._restarts + ' ffmpeg restarts ' + this.key); return this.close(); }
-    this._restartTimer = setTimeout(() => { this._restartTimer = null; if (!this.closed) this._spawn(); }, Math.min(500 * this._restarts, 5000));
+    const wait = Math.min(500 * this._restarts, 5000);
+    this._restartTimer = setTimeout(async () => {
+      this._restartTimer = null;
+      if (this.closed) return;
+      if (Date.now() - this.lastAccess > IDLE_MS) return this.close();
+      // Source died? Get a fresh lease/broadcast before respawning ffmpeg onto it.
+      if ((!this.broadcast || this.broadcast.closed) && this.makeLease) {
+        try {
+          if (this.lease) { try { this.lease.release(); } catch (e) {} }
+          this.lease = await this.makeLease();
+          this.broadcast = this.lease.upstream;
+          log('re-leased fresh source for ' + this.key);
+        } catch (e) {
+          log('re-lease failed for ' + this.key + ': ' + ((e && e.message) || e));
+          return this._scheduleRestart();
+        }
+      }
+      if (!this.closed) this._spawn();
+    }, wait);
   }
 
   _waitForPlaylist() {
@@ -153,6 +173,7 @@ class HlsManager {
     let s = this.sessions.get(key);
     if (s) { s.touch(); if (s._starting) { try { await s._starting; } catch (e) { /* fall through to recreate below */ } } if (!s.closed) return s; }
     s = new HlsSession(key);
+    s.makeLease = makeLease;   // kept so the session can re-lease a fresh source if its broadcast dies
     this.sessions.set(key, s);
     try {
       s.lease = await makeLease();

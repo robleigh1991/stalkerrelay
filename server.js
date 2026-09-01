@@ -354,7 +354,10 @@ function headersFrom(ctx) {
   if (ctx.ua) h['User-Agent'] = ctx.ua;
   if (ctx.referer) h.Referer = ctx.referer;
   if (ctx.cookie) h.Cookie = ctx.cookie;
-  if (ctx.auth) h.Authorization = 'Bearer ' + ctx.auth;
+  // Deliberately NO Authorization: Bearer. That device token authorizes portal API calls, not the
+  // stream — the play_token in the resolved URL does that. Sending it makes the source validate a
+  // token that rotates, and once stale it answers MAG_TOKEN_INVALID (as HTTP 200 with a 401 body),
+  // killing an otherwise-valid stream. Real players fetch the play URL without it, so neither do we.
   h.Accept = '*/*';
   return h;
 }

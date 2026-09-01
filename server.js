@@ -37,7 +37,7 @@ const ui = require('./ui');
 
 // Bump on every change worth verifying in a deploy. Printed at startup so the container log tells
 // you at a glance which build is actually running — no more guessing whether a re-pull took.
-const BUILD = 'hls-noreplay+ghost-fix 2026-09-01';
+const BUILD = 'hls-visible+noreplay+ghost 2026-09-01';
 
 const hls = new HlsManager();
 
@@ -400,11 +400,14 @@ async function handleHls(req, res, parts, bound) {
   const headers = session.client.streamContext ? headersFrom(session.client.streamContext()) : {};
   let s;
   try {
-    s = await hls.get(key, async () => {
+    s = await hls.get(key, async () => session.lease('hls:' + streamId, async () => {
       const url = await resolveStream(session, entry);
-      return new Broadcast(url, headers, () => resolveStream(session, entry));
-    });
+      const b = new Broadcast(url, headers, () => resolveStream(session, entry));
+      await b.start();
+      return b;
+    }, { label: entry.name || ('#' + streamId), kind: 'live' }));
   } catch (e) {
+    if (e && e.busy) return text(res, 503, e.message);
     return text(res, 502, 'could not start HLS: ' + ((e && e.message) || e));
   }
   return serveFile(res, s.playlistPath(), 'application/vnd.apple.mpegurl');

@@ -31,7 +31,8 @@ function log(msg) { try { console.log('[hls] ' + msg); } catch (e) {} }
 class HlsSession {
   constructor(key) {
     this.key = key;
-    this.broadcast = null;       // set by the manager before start()
+    this.broadcast = null;       // = lease.upstream, set by the manager before start()
+    this.lease = null;           // the session's connection lease, so HLS shows in "Playing now"
     this.dir = path.join(HLS_ROOT, key.replace(/[^a-zA-Z0-9_-]/g, '_'));
     this.ff = null;
     this.input = null;
@@ -49,7 +50,7 @@ class HlsSession {
     if (this._starting) return this._starting;
     this._starting = (async () => {
       fs.mkdirSync(this.dir, { recursive: true });
-      await this.broadcast.start();      // establish the source; throws if the channel is dead
+      // The broadcast (lease.upstream) was already started by the lease factory.
       this._spawn();
       await this._waitForPlaylist();
       log('session ready ' + this.key);
@@ -132,7 +133,9 @@ class HlsSession {
     log('closing ' + this.key);
     if (this.ff) { try { this.ff.kill('SIGKILL'); } catch (e) {} this.ff = null; }
     try { if (this.input) this.input.end(); } catch (e) {}
-    try { if (this.broadcast) this.broadcast.close(); } catch (e) {}
+    // Release the lease (its linger closes the broadcast) so the channel leaves "Playing now" and
+    // frees the connection slot. Fall back to closing the broadcast directly if there's no lease.
+    try { if (this.lease) this.lease.release(); else if (this.broadcast) this.broadcast.close(); } catch (e) {}
     try { fs.rmSync(this.dir, { recursive: true, force: true }); } catch (e) {}
   }
 }
@@ -145,14 +148,15 @@ class HlsManager {
     if (this._gc.unref) this._gc.unref();
   }
 
-  /** makeBroadcast: async () => Broadcast. Only called when a session must be created. */
-  async get(key, makeBroadcast) {
+  /** makeLease: async () => a started lease ({ upstream: Broadcast, release }). Called only on create. */
+  async get(key, makeLease) {
     let s = this.sessions.get(key);
     if (s) { s.touch(); if (s._starting) { try { await s._starting; } catch (e) { /* fall through to recreate below */ } } if (!s.closed) return s; }
     s = new HlsSession(key);
     this.sessions.set(key, s);
     try {
-      s.broadcast = await makeBroadcast();
+      s.lease = await makeLease();
+      s.broadcast = s.lease.upstream;
       await s.start();
     } catch (e) {
       this.sessions.delete(key);

@@ -238,10 +238,24 @@ function relayFile(target, headers, req, res) {
   let resumes = 0;
   let closed = false;
 
+  // The resolved play link is already authorized by its own play_token. Portal session headers
+  // (Authorization: Bearer, Cookie) don't belong on it, and some panels 403/401/456 the /series/
+  // and /movie/ play endpoints when Authorization is present — the exact reason a real player
+  // sends the bare request. Start with the portal headers (some panels DO want the UA/Referer),
+  // then fall back to a bare fetch once on an auth-shaped rejection.
+  let activeHeaders = headers;
+  let bareTried = false;
+  const stripAuth = (h) => {
+    const c = Object.assign({}, h);
+    delete c.Authorization;
+    delete c.Cookie;
+    return c;
+  };
+
   req.on('close', () => { closed = true; });
 
   const start = (rangeHeader, first) => {
-    const h = Object.assign({}, headers);
+    const h = Object.assign({}, activeHeaders);
     if (rangeHeader) h.Range = rangeHeader;
 
     requestWithRetry(target, h, {}, (err, up) => {
@@ -250,6 +264,16 @@ function relayFile(target, headers, req, res) {
         if (!res.headersSent) { res.writeHead(502); res.end('relay: ' + err.message); }
         else { try { res.destroy(); } catch (e) {} }
         return;
+      }
+      if (!bareTried && !res.headersSent &&
+          (up.statusCode === 401 || up.statusCode === 403 || up.statusCode === 456) &&
+          (activeHeaders.Authorization || activeHeaders.Cookie)) {
+        // Panel refused the tokenised play link while portal auth headers were attached. Retry bare.
+        bareTried = true;
+        activeHeaders = stripAuth(activeHeaders);
+        up.resume();
+        log('file: ' + up.statusCode + ' with auth headers — retrying bare (play_token only)');
+        return start(rangeHeader, first);
       }
       if (up.statusCode >= 400) {
         let body = '';
@@ -297,7 +321,7 @@ function relayFile(target, headers, req, res) {
 
   const resumeAt = (offset) => {
     const want = offset;
-    const h = Object.assign({}, headers, { Range: 'bytes=' + want + '-' });
+    const h = Object.assign({}, activeHeaders, { Range: 'bytes=' + want + '-' });
     requestWithRetry(target, h, {}, (err, up) => {
       if (closed) { if (up) up.destroy(); return; }
       // Only a 206 from exactly where we stopped can be appended. A 200 means the server ignored

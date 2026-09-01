@@ -209,6 +209,27 @@ async function resolveStream(session, entry) {
   return link.url;
 }
 
+// A player re-requests the same title constantly while it plays — ExoPlayer/AVPlayer open fresh
+// range/buffer requests, and in redirect delivery each one would otherwise mint a NEW play_token.
+// That hammers the portal and, on panels that invalidate older tokens, the newest token kills the
+// stream that is already playing. Cache the resolved link briefly per stream so those repeats reuse
+// one token. Short TTL so a genuinely new play still gets a fresh link.
+const LINK_TTL_MS = 25000;
+const linkCache = new Map();   // key -> { url, at }
+async function resolveCached(session, entry, streamId) {
+  const ep = entry && entry.item && entry.item.seriesEp != null ? entry.item.seriesEp : '';
+  const key = session.id + '|' + streamId + '|' + ep;
+  const hit = linkCache.get(key);
+  if (hit && (Date.now() - hit.at) < LINK_TTL_MS) return hit.url;
+  const url = await resolveStream(session, entry);
+  linkCache.set(key, { url: url, at: Date.now() });
+  if (linkCache.size > 512) {   // cheap prune so the map can't grow unbounded
+    const now = Date.now();
+    for (const [k, v] of linkCache) if (now - v.at >= LINK_TTL_MS) linkCache.delete(k);
+  }
+  return url;
+}
+
 async function handlePlay(req, res, kind, parts, bound) {
   const user = decodeURIComponent(parts[1] || '');
   const pass = decodeURIComponent(parts[2] || '');
@@ -233,7 +254,7 @@ async function handlePlay(req, res, kind, parts, bound) {
   // the relay — otherwise use proxy delivery. No lease is taken: the relay carries no bytes here.
   if ((session.cfg && session.cfg.delivery) === 'redirect') {
     let url;
-    try { url = await resolveStream(session, entry); }
+    try { url = await resolveCached(session, entry, streamId); }
     catch (e) { return text(res, 502, 'could not get a link: ' + ((e && e.message) || e)); }
     res.writeHead(302, { Location: url, 'Cache-Control': 'no-cache' });
     return res.end();
@@ -304,7 +325,7 @@ async function handlePlay(req, res, kind, parts, bound) {
   }
 
   let url;
-  try { url = await resolveStream(session, entry); }
+  try { url = await resolveCached(session, entry, streamId); }
   catch (e) { lease.release(); return text(res, 502, 'could not get a link: ' + ((e && e.message) || e)); }
 
   let released = false;

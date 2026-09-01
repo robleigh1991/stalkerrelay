@@ -40,6 +40,7 @@ class HlsSession {
     this._starting = null;
     this._restartTimer = null;
     this._restarts = 0;
+    this._segBase = 0;   // ffmpeg -start_number; bumped each respawn so seg names never repeat
   }
 
   playlistPath() { return path.join(this.dir, 'index.m3u8'); }
@@ -71,6 +72,10 @@ class HlsSession {
       '-hls_time', String(SEG_TIME),
       '-hls_list_size', String(LIST_SIZE),
       '-hls_delete_threshold', '1',
+      // Continue the segment NUMBER and media-sequence across an ffmpeg respawn (bumped in onExit),
+      // so a respawn never reuses seg_0 — a reused name is exactly what the phone had cached and
+      // replayed. append_list keeps writing the same rolling playlist rather than resetting it.
+      '-start_number', String(this._segBase),
       '-hls_flags', 'delete_segments+append_list+omit_endlist+independent_segments+program_date_time',
       '-hls_segment_type', 'mpegts',
       '-hls_segment_filename', path.join(this.dir, 'seg_%d.ts'),
@@ -88,6 +93,10 @@ class HlsSession {
       log('ffmpeg exited (' + why + ') for ' + this.key);
       try { this.broadcast.removeViewer(this.input); } catch (e) {}
       this.ff = null;
+      // If the source is gone, restarting ffmpeg onto a dead broadcast just produces a static
+      // playlist the phone loops forever — close instead, so the next request rebuilds cleanly.
+      if (this.broadcast.closed) { log('broadcast gone — closing ' + this.key); return this.close(); }
+      this._segBase += 100000;   // continue segment numbers past anything already written
       this._scheduleRestart();
     };
     ff.on('exit', (code) => onExit('code ' + code));

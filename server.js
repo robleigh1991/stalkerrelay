@@ -37,7 +37,7 @@ const ui = require('./ui');
 
 // Bump on every change worth verifying in a deploy. Printed at startup so the container log tells
 // you at a glance which build is actually running — no more guessing whether a re-pull took.
-const BUILD = 'hls-live-mobile 2026-09-01';
+const BUILD = 'hls-live-noreplay 2026-09-01';
 
 const hls = new HlsManager();
 
@@ -404,10 +404,13 @@ async function handleHls(req, res, parts, bound) {
 function serveFile(res, filePath, contentType) {
   fs.stat(filePath, (err, st) => {
     if (err || !st.isFile()) return text(res, 404, 'not found');
+    // The playlist changes every couple of seconds — it must NEVER be cached, or the player keeps
+    // replaying a stale window. Segments are immutable once written, so they may be cached.
+    const isPlaylist = /mpegurl/.test(contentType);
     res.writeHead(200, {
       'Content-Type': contentType,
       'Content-Length': st.size,
-      'Cache-Control': 'no-cache',
+      'Cache-Control': isPlaylist ? 'no-store, no-cache, must-revalidate' : 'public, max-age=30',
       'Access-Control-Allow-Origin': '*',
     });
     const rs = fs.createReadStream(filePath);
@@ -487,7 +490,7 @@ async function handler(req, res, opts) {
     // Five parts, the last being the playlist or a segment. The streamId sits in its own path segment
     // so the player resolves segment names relative to it without collisions.
     if (parts[0] === 'live' && parts.length === 5 &&
-        (parts[4] === 'index.m3u8' || /^seg_\d+\.ts$/.test(parts[4]))) {
+        (parts[4] === 'index.m3u8' || /\.ts$/.test(parts[4]))) {
       return await handleHls(req, res, parts, bound);
     }
     if (parts.length >= 4 && ['live', 'movie', 'series'].indexOf(parts[0]) >= 0) {

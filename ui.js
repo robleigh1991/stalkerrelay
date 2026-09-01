@@ -406,7 +406,10 @@ const PAGE = `<!DOCTYPE html>
       l.status.streams.forEach(function (s) {
         // The name, not the internal lease key — "BBC One", not "live:18236".
         var line = '  ' + (s.kind === 'live' ? '● ' : '▶ ') + (s.label || s.key);
-        if (s.viewers > 1) line += '  (' + s.viewers + ' viewers)';
+        // Live refs are genuine viewers (fan-out across devices). A file lease is keyed per device,
+        // so its refs are overlapping range requests from ONE viewer seeking/buffering — call those
+        // requests, not viewers, or a single person skipping ahead reads as a crowd.
+        if (s.viewers > 1) line += '  (' + s.viewers + (s.kind === 'live' ? ' viewers)' : ' requests)');
         if (s.since) line += '  ' + ago(s.since);
         st.appendChild(el('div', null, line));
       });

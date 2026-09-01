@@ -30,6 +30,15 @@ const MAX_REDIRECTS = 6;
 const RESUME_MAX = 20;                                  // re-opens per stream before giving up
 const REOPEN_BACKOFF = [300, 800, 2000, 4000, 6000];
 const RETRY_5XX = [400, 1200, 2500, 4000];
+// A live upstream that dies faster than this, or before delivering this many bytes, is contention
+// (another channel on the same line evicted it), not a normal reconnect. Back off instead of
+// re-opening instantly, which would machine-gun the line and ping-pong two channels into killing
+// each other. A stream that runs past HEALTHY_MS/BYTES is healthy and resets the resume counter.
+const MIN_ALIVE_MS = 4000;
+const MIN_ALIVE_BYTES = 64 * 1024;
+const STILLBORN_BACKOFF = [500, 1000, 2000, 4000, 8000];
+const HEALTHY_MS = 20000;
+const HEALTHY_BYTES = 512 * 1024;
 
 function isTlsError(e) {
   if (!e) return false;
@@ -163,7 +172,15 @@ class Broadcast {
 
   _attachUpstream(res) {
     this.upstream = res;
+    this._openedAt = Date.now();
+    this._bytesThisOpen = 0;
     res.on('data', (c) => {
+      this._bytesThisOpen += c.length;
+      // A stream that has run healthily for a while is not "resuming" — forgive earlier churn so a
+      // long-lived channel never slowly accumulates toward the give-up cap.
+      if (this.resumes && (Date.now() - this._openedAt) > HEALTHY_MS && this._bytesThisOpen > HEALTHY_BYTES) {
+        this.resumes = 0;
+      }
       for (const v of this.viewers) {
         // Never let one slow viewer stall the others or balloon memory: drop it instead.
         if (!v.write(c) && v.writableLength > 8 * 1024 * 1024) {
@@ -175,6 +192,18 @@ class Broadcast {
     const ended = (why) => {
       if (this.closed) return;
       res.removeAllListeners();
+      const aliveMs = Date.now() - (this._openedAt || Date.now());
+      // Died almost immediately with little data: another stream on this line evicted it, or the
+      // source dropped us. Re-opening instantly machine-guns the line and, with two channels open,
+      // ping-pongs them into mutual eviction. Back off, escalating, so the line can settle.
+      if ((aliveMs < MIN_ALIVE_MS || this._bytesThisOpen < MIN_ALIVE_BYTES) && this.viewers.size) {
+        if (this.resumes >= RESUME_MAX) { log('giving up after ' + this.resumes + ' re-opens'); return this.close(); }
+        this.resumes++;
+        const wait = STILLBORN_BACKOFF[Math.min(this.resumes - 1, STILLBORN_BACKOFF.length - 1)];
+        log('upstream ' + why + ' after ' + this._bytesThisOpen + 'B/' + aliveMs + 'ms — contention, backing off ' +
+          wait + 'ms (' + this.resumes + '/' + RESUME_MAX + ')');
+        return setTimeout(() => { if (!this.closed && this.viewers.size) this._reopen(why, 1); }, wait);
+      }
       this._reopen(why);
     };
     res.on('end', () => ended('ended'));

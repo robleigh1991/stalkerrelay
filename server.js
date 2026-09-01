@@ -253,11 +253,14 @@ async function handlePlay(req, res, kind, parts, bound) {
   // directly. Only safe when the edge is reachable from the device and its token isn't IP-locked to
   // the relay — otherwise use proxy delivery. No lease is taken: the relay carries no bytes here.
   //
-  // FILES ONLY. A live stream is continuous and drops constantly; the device would hit end-of-stream
-  // and have to re-request a fresh token each time ("pieces"). Live always goes through the Broadcast
-  // path below, which holds the upstream open and re-opens on drops into one unbroken stream — so we
-  // never redirect live even on a redirect line.
-  if ((session.cfg && session.cfg.delivery) === 'redirect' && entry.kind !== 'live') {
+  // Redirect covers LIVE too. Proxying live makes the relay HOLD one source connection per channel,
+  // which the line's concurrent-stream limit refuses past the first (the "90-byte" refusal). By
+  // redirecting, the relay only briefly touches the source to mint the link; the device then streams
+  // the edge directly and the source holds no ongoing live connection — so many channels play as long
+  // as the edge itself is unmetered. Trade-off: if a live edge token is short-lived, the device must
+  // re-request when it expires (a brief reconnect) instead of the relay smoothing it. That's the
+  // price of one-connection-per-line, and it's what the operator asked for by choosing redirect.
+  if ((session.cfg && session.cfg.delivery) === 'redirect') {
     let url;
     try { url = await resolveCached(session, entry, streamId); }
     catch (e) { return text(res, 502, 'could not get a link: ' + ((e && e.message) || e)); }

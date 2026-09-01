@@ -149,6 +149,11 @@ class Broadcast {
     this.target = target;
     this.headers = headers || {};
     this.refresh = refresh || null;
+    // The URL we actually streamed FROM after following redirects — the CDN edge, not the portal's
+    // play endpoint. The edge is authorised by its own blob, independent of the MAG session, so
+    // re-opening IT does not get revoked when another channel opens. We reopen the edge first and
+    // only fall back to a fresh portal resolve when the edge blob itself has expired.
+    this.edgeTarget = null;
     this.viewers = new Set();
     this.upstream = null;
     this.closed = false;
@@ -158,7 +163,7 @@ class Broadcast {
 
   start() {
     return new Promise((resolve, reject) => {
-      requestWithRetry(this.target, this.headers, {}, (err, res) => {
+      requestWithRetry(this.target, this.headers, {}, (err, res, finalUrl) => {
         if (err) return reject(err);
         if (res.statusCode >= 400) {
           let body = '';
@@ -175,6 +180,7 @@ class Broadcast {
           return;
         }
         this.contentType = res.headers['content-type'] || this.contentType;
+        if (finalUrl && finalUrl !== this.target) { this.edgeTarget = finalUrl; log('resolved edge: ' + finalUrl.slice(0, 90)); }
         this._attachUpstream(res);
         resolve(this);
       });
@@ -253,32 +259,36 @@ class Broadcast {
       return this.close();
     };
 
-    // Try the current URL first — a drop usually just needs re-opening, and the token is often still
-    // valid, so this stays instant (no portal round-trip). Only if the re-open FAILS do we assume the
-    // play_token expired and mint a fresh one, retrying once before backing off. `refreshed` guards
-    // against looping, and we re-check viewers after the await so we never reconnect for nobody.
+    // Re-open the EDGE directly first. The edge blob is independent of the MAG session, so hitting it
+    // again does NOT get revoked when another channel opens — which is the whole point: one portal
+    // touch per channel, then the edge carries the stream. Only when the edge FAILS (its blob expired)
+    // do we go back to the portal for a fresh link, which redirects us to a new edge. `refreshed`
+    // guards against looping; we re-check viewers after the await so we never reconnect for nobody.
     const attempt = (target, refreshed) => {
-      requestWithRetry(target, this.headers, {}, (err, res) => {
+      requestWithRetry(target, this.headers, {}, (err, res, finalUrl) => {
         if (this.closed) { if (res) res.destroy(); return; }
         if (err || !res || res.statusCode >= 400) {
           if (res) res.resume();
           if (this.refresh && !refreshed) {
-            log('re-open failed — minting a fresh play_token (viewers=' + this.viewers.size + ')');
+            log('edge re-open failed — resolving a fresh link via the portal (viewers=' + this.viewers.size + ')');
             return this.refresh()
               .then((u) => {
                 if (this.closed || !this.viewers.size) { log('refresh done but no viewers — stopping'); return this.close(); }
                 if (u) this.target = u;
+                this.edgeTarget = null;         // force the portal path; it will capture a new edge
                 attempt(this.target, true);
               })
               .catch(() => { if (!this.closed && this.viewers.size) scheduleBackoff(); else this.close(); });
           }
           return scheduleBackoff();
         }
+        if (finalUrl && finalUrl !== this.target) this.edgeTarget = finalUrl;
         this._attachUpstream(res);
       });
     };
 
-    attempt(this.target, false);
+    // Prefer the last-known edge; fall back to the portal URL (which redirects to a fresh edge).
+    attempt(this.edgeTarget || this.target, false);
   }
 
   addViewer(stream) { this.viewers.add(stream); log('viewer added (viewers=' + this.viewers.size + ')'); }

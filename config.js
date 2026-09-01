@@ -26,6 +26,11 @@ const DEFAULTS = {
   lang: process.env.RELAY_LANG || 'en',
   userAgent: '',
   maxConnections: 2,
+  // When the provider counts connections only at the portal/create_link layer and leaves the
+  // resolved edge URLs unmetered, `unmetered` lifts the relay's own cap so distinct streams aren't
+  // refused. `delivery: 'redirect'` hands the edge URL to the device instead of piping the bytes.
+  unmetered: false,
+  delivery: 'proxy',
   epgUrl: '',
   enabled: true,
 };
@@ -83,6 +88,10 @@ function validateLine(input, existing, all) {
   const mc = parseInt(line.maxConnections, 10);
   if (!isFinite(mc) || mc < 1 || mc > 20) return bad('Connections must be between 1 and 20');
   line.maxConnections = mc;
+
+  line.unmetered = line.unmetered === true || line.unmetered === 'true' || line.unmetered === '1';
+  const delivery = String(line.delivery || 'proxy').trim().toLowerCase();
+  line.delivery = delivery === 'redirect' ? 'redirect' : 'proxy';
 
   // A blank password would leave the line open to anyone who can reach the port.
   const pw = String(line.password == null ? '' : line.password);

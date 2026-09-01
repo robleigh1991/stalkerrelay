@@ -157,6 +157,21 @@ const PAGE = `<!DOCTYPE html>
           </select></label>
       </div>
 
+      <div class="two">
+        <label><span class="lbl">Delivery</span>
+          <select id="f_delivery">
+            <option value="proxy">Proxy — relay streams the bytes</option>
+            <option value="redirect">Redirect — device plays the edge URL</option>
+          </select>
+          <span class="hint">Redirect only if the edge is reachable from your devices.</span></label>
+        <label><span class="lbl">Unmetered edge</span>
+          <select id="f_unmetered">
+            <option value="0">No — respect max connections</option>
+            <option value="1">Yes — no connection cap</option>
+          </select>
+          <span class="hint">Only if the source caps at the portal, not the stream URL.</span></label>
+      </div>
+
       <label><span class="lbl">EPG URL (optional)</span>
         <input id="f_epg" placeholder="Leave empty to build one from the portal"></label>
 
@@ -478,6 +493,7 @@ const PAGE = `<!DOCTYPE html>
   var F = {
     name: 'f_name', portal: 'f_portal', mac: 'f_mac', max: 'f_max', port: 'f_port',
     pass: 'f_pass', tz: 'f_tz', epg: 'f_epg', ua: 'f_ua', enabled: 'f_enabled',
+    delivery: 'f_delivery', unmetered: 'f_unmetered',
   };
   function fv(k) { return document.getElementById(F[k]).value; }
   function setf(k, v) { document.getElementById(F[k]).value = v == null ? '' : String(v); }
@@ -508,6 +524,8 @@ const PAGE = `<!DOCTYPE html>
     setf('tz', line ? line.timezone : 'Europe/London');
     setf('epg', line ? line.epgUrl : '');
     setf('ua', line ? line.userAgent : '');
+    setf('delivery', line ? (line.delivery || 'proxy') : 'proxy');
+    setf('unmetered', line ? (line.unmetered ? '1' : '0') : '0');
     setf('enabled', line ? (line.enabled ? '1' : '0') : '1');
     dlg.showModal();
   }
@@ -532,6 +550,8 @@ const PAGE = `<!DOCTYPE html>
       timezone: fv('tz').trim(),
       epgUrl: fv('epg').trim(),
       userAgent: fv('ua').trim(),
+      delivery: fv('delivery'),
+      unmetered: fv('unmetered') === '1',
       enabled: fv('enabled') === '1',
     };
   }

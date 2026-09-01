@@ -119,6 +119,8 @@ function lineView(line, session) {
     port: line.port || null,
     password: line.password,
     maxConnections: line.maxConnections,
+    unmetered: line.unmetered === true,
+    delivery: line.delivery === 'redirect' ? 'redirect' : 'proxy',
     timezone: line.timezone,
     lang: line.lang,
     userAgent: line.userAgent || '',

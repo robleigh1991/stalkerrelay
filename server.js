@@ -227,6 +227,18 @@ async function handlePlay(req, res, kind, parts, bound) {
   const entry = session.catalog.resolve(streamId);
   if (!entry) return text(res, 404, 'unknown stream id ' + streamId);
 
+  // REDIRECT delivery: mint the link, hand the edge URL straight to the device, and step out of the
+  // byte path entirely. The relay still brokers the single portal auth; the device streams the edge
+  // directly. Only safe when the edge is reachable from the device and its token isn't IP-locked to
+  // the relay — otherwise use proxy delivery. No lease is taken: the relay carries no bytes here.
+  if ((session.cfg && session.cfg.delivery) === 'redirect') {
+    let url;
+    try { url = await resolveStream(session, entry); }
+    catch (e) { return text(res, 502, 'could not get a link: ' + ((e && e.message) || e)); }
+    res.writeHead(302, { Location: url, 'Cache-Control': 'no-cache' });
+    return res.end();
+  }
+
   const headers = session.client.streamContext
     ? headersFrom(session.client.streamContext())
     : {};

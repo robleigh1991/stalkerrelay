@@ -45,6 +45,11 @@ class Session {
     // just moves the failure to the portal where the error is less useful.
     this.maxConnections = Math.max(1, parseInt(this.cfg.maxConnections, 10) || 2);
 
+    // The portal session is always shared. `unmetered` additionally lifts the concurrent-stream
+    // cap: use it when the source counts connections only at the portal, not on the resolved edge
+    // URLs, so N devices on different content don't hit LINE_BUSY.
+    this.unmetered = this.cfg.unmetered === true;
+
     this.leases = new Map();     // key -> { key, refs, upstream, closeTimer, meta }
     this.connected = false;
     this.lastError = null;
@@ -127,7 +132,7 @@ class Session {
       return { upstream: lease.upstream, release: () => this._release(key), shared: true };
     }
 
-    if (this.leases.size >= this.maxConnections) {
+    if (!this.unmetered && this.leases.size >= this.maxConnections) {
       const e = new Error('All ' + this.maxConnections + ' connections on this line are in use. ' +
         'Stop another stream and try again.');
       e.busy = true;
@@ -217,6 +222,7 @@ class SessionPool {
       if (existing && sameConnection(existing.cfg, p)) {
         existing.cfg = Object.assign(existing.cfg, p);
         existing.maxConnections = Math.max(1, parseInt(p.maxConnections, 10) || existing.maxConnections);
+        existing.unmetered = p.unmetered === true;
         return;
       }
       if (existing) existing.stop();

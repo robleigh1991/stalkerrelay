@@ -24,10 +24,12 @@ const HLS_ROOT = process.env.RELAY_HLS_DIR || path.join(os.tmpdir(), 'relay-hls'
 const IDLE_MS = 30000;          // close a session no one has polled for this long
 const PLAYLIST_TIMEOUT_MS = 15000;
 const SEG_TIME = 2;             // seconds per segment
-// A wide window (~32s of segments) so the phone can sit well behind the live edge and buffer a real
-// cushion — the equivalent of desktop's deep buffer. That cushion is what rides out a source hiccup
-// ("Connection failed with database!", token churn) instead of the playlist running dry and looping.
-const LIST_SIZE = 16;
+// A DEEP window (~60s of segments) so the phone can sit well behind the live edge with a big buffered
+// cushion — the equivalent of desktop's deep buffer. Live data only arrives at 1x, so the only way to
+// ride a multi-second source wobble ("Connection failed with database!", token churn, an 8s retry
+// backoff) is to keep more already-produced segments available to play through it. Costs a little
+// disk per channel and adds latency behind live, both cheap next to the stream cutting out.
+const LIST_SIZE = 30;
 
 function log(msg) { try { console.log('[hls] ' + msg); } catch (e) {} }
 

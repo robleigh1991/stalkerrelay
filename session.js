@@ -129,7 +129,15 @@ class Session {
       if (lease.closeTimer) { clearTimeout(lease.closeTimer); lease.closeTimer = null; }
       log(this, 'lease join ' + ((lease.meta && lease.meta.label) || key) +
         ' (viewers=' + lease.refs + ')');
-      return { upstream: lease.upstream, release: () => this._release(key), shared: true };
+      // The first caller may still be opening the upstream — join its in-flight open rather than
+      // handing back a null upstream (which the caller would then addViewer() on and crash).
+      let upstream = lease.upstream;
+      if (!upstream && lease.opening) {
+        try { upstream = await lease.opening; }
+        catch (e) { this._release(key); throw e; }
+      }
+      if (!upstream) { this._release(key); throw new Error('stream is no longer available'); }
+      return { upstream: upstream, release: () => this._release(key), shared: true };
     }
 
     if (!this.unmetered && this.leases.size >= this.maxConnections) {
@@ -142,17 +150,22 @@ class Session {
 
     // Reserve the slot BEFORE awaiting, or two simultaneous requests both see room and overshoot.
     lease = {
-      key: key, refs: 1, upstream: null, closeTimer: null,
+      key: key, refs: 1, upstream: null, opening: null, closeTimer: null,
       // What a human should be told is playing — "BBC One", not "live:18236".
       meta: meta || null,
       at: Date.now(),
     };
     this.leases.set(key, lease);
+    // Expose the in-flight open as a promise so a simultaneous joiner awaits it instead of racing to
+    // a null upstream (see the join branch above).
+    lease.opening = Promise.resolve().then(open);
     try {
-      lease.upstream = await open();
+      lease.upstream = await lease.opening;
     } catch (e) {
       this.leases.delete(key);
       throw e;
+    } finally {
+      lease.opening = null;
     }
     log(this, 'lease open ' + ((meta && meta.label) || key) +
       ' (' + this.leases.size + '/' + this.maxConnections + ')');

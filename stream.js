@@ -232,7 +232,7 @@ class Broadcast {
       return this.close();
     }
     if (tries === 0) this.resumes++;
-    log('upstream ' + why + ' — re-opening (' + this.resumes + '/' + RESUME_MAX + ')');
+    log('upstream ' + why + ' — re-opening (' + this.resumes + '/' + RESUME_MAX + ', viewers=' + this.viewers.size + ')');
 
     const attempt = (target) => {
       requestWithRetry(target, this.headers, {}, (err, res) => {
@@ -250,25 +250,37 @@ class Broadcast {
     };
 
     // Mint a fresh play_token for each re-open when we can — the old one is why the source ended.
+    // Re-check closed/viewers AFTER the await: the last viewer can leave while create_link is in
+    // flight, and opening a fresh upstream for nobody is exactly the idle-reconnect leak.
     if (this.refresh) {
+      log('refreshing play_token (viewers=' + this.viewers.size + ')');
       this.refresh()
-        .then((u) => { if (!this.closed) { if (u) this.target = u; attempt(this.target); } })
-        .catch(() => { if (!this.closed) attempt(this.target); });
+        .then((u) => {
+          if (this.closed || !this.viewers.size) { log('refresh done but no viewers — stopping'); return this.close(); }
+          if (u) this.target = u;
+          attempt(this.target);
+        })
+        .catch(() => { if (!this.closed && this.viewers.size) attempt(this.target); else this.close(); });
     } else {
       attempt(this.target);
     }
   }
 
-  addViewer(stream) { this.viewers.add(stream); }
+  addViewer(stream) { this.viewers.add(stream); log('viewer added (viewers=' + this.viewers.size + ')'); }
 
   removeViewer(stream) {
     this.viewers.delete(stream);
     try { stream.end(); } catch (e) {}
+    log('viewer removed (viewers=' + this.viewers.size + ')');
+    // Not closed here: the lease lingers briefly so a channel surf back reuses this upstream. A
+    // 0-viewer broadcast that then hits a source-end closes in _reopen; a refresh in flight is
+    // guarded by the viewers check after it resolves. So no reconnect-into-the-void.
   }
 
   close() {
     if (this.closed) return;
     this.closed = true;
+    log('broadcast closed (viewers=' + this.viewers.size + ')');
     if (this.upstream) { try { this.upstream.destroy(); } catch (e) {} }
     for (const v of Array.from(this.viewers)) { try { v.end(); } catch (e) {} }
     this.viewers.clear();

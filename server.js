@@ -261,6 +261,7 @@ async function handlePlay(req, res, kind, parts, bound) {
     let url;
     try { url = await resolveCached(session, entry, streamId); }
     catch (e) { return text(res, 502, 'could not get a link: ' + ((e && e.message) || e)); }
+    log('redirect ' + entry.kind + ' #' + streamId + ' -> ' + url);
     res.writeHead(302, { Location: url, 'Cache-Control': 'no-cache' });
     return res.end();
   }

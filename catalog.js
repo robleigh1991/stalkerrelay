@@ -408,13 +408,17 @@ class Catalog {
     const seasons = [];
     const episodes = {};
 
-    // A Stalker "season" carries a `series` array of episode NUMBERS; an episode is played with the
-    // season's cmd plus that number, not with a cmd of its own.
+    // A Stalker "season" carries an array of episode NUMBERS; an episode is played with the
+    // season's cmd plus that number, not with a cmd of its own. _vodParse exposes that array as
+    // `.episodes` (and `.seasons`); the raw portal field is `.series`. Reading only `.series` here
+    // meant nums was always empty, so episodes fell to the id-less branch and create_link got no
+    // `series` param — the portal then returned `/series/.../.` (no episode) and the edge 403'd.
     for (let i = 0; i < seasonItems.length; i++) {
       const s = seasonItems[i];
       const num = seasonNumber(s.name, i + 1);
       const eps = [];
-      const nums = Array.isArray(s.series) ? s.series : [];
+      const nums = Array.isArray(s.episodes) ? s.episodes
+        : (Array.isArray(s.series) ? s.series : []);
 
       if (nums.length) {
         nums.forEach((n) => {

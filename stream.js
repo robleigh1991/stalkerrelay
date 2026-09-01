@@ -246,9 +246,11 @@ function relayFile(target, headers, req, res) {
   let activeHeaders = headers;
   let bareTried = false;
   const stripAuth = (h) => {
-    const c = Object.assign({}, h);
-    delete c.Authorization;
-    delete c.Cookie;
+    // Fully bare, like a plain player: User-Agent (+ Accept) only. Portal Referer/Cookie/Bearer are
+    // what a token-gated /series/ or /movie/ edge rejects; the play_token in the URL is the auth.
+    const c = {};
+    if (h['User-Agent']) c['User-Agent'] = h['User-Agent'];
+    if (h.Accept) c.Accept = h.Accept;
     return c;
   };
 

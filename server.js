@@ -36,7 +36,7 @@ const ui = require('./ui');
 
 // Bump on every change worth verifying in a deploy. Printed at startup so the container log tells
 // you at a glance which build is actually running — no more guessing whether a re-pull took.
-const BUILD = 'live-remux-optin 2026-09-01';
+const BUILD = 'live-remux-lowlatency 2026-09-01';
 
 const PORT = parseInt(process.env.RELAY_PORT, 10) || 4700;
 const STATE_FILE = process.env.RELAY_STATE_FILE || '/data/relay-state.json';

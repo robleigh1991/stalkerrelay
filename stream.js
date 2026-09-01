@@ -367,11 +367,19 @@ class LiveRemux {
     this.broadcast.addViewer(this.input);
     const args = [
       '-hide_banner', '-loglevel', 'error',
-      '-fflags', '+genpts+discardcorrupt',
+      // Low-latency input: don't sit buffering/analyzing before the first output, or a strict player
+      // (ExoPlayer) sees a startup gap, rebuffers and reconnects. Keep probesize just big enough to
+      // find the H.264/audio params.
+      '-fflags', 'nobuffer+genpts+discardcorrupt',
+      '-flags', 'low_delay',
+      '-probesize', '500000',
+      '-analyzeduration', '1000000',
       '-i', 'pipe:0',
       '-map', '0:v:0?', '-map', '0:a:0?',
       '-c:v', 'copy', '-c:a', 'aac', '-ac', '2', '-b:a', '160k', '-ar', '48000', '-sn',
       '-max_muxing_queue_size', '1024',
+      // Emit immediately, no mux look-ahead — every packet flushed as soon as it's ready.
+      '-muxdelay', '0', '-muxpreload', '0', '-flush_packets', '1',
       '-f', 'mpegts', 'pipe:1',
     ];
     let ff;

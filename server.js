@@ -27,7 +27,7 @@ const { URL } = require('url');
 
 const { SessionPool } = require('./session');
 const { Catalog } = require('./catalog');
-const { Broadcast, relayFile, viewerStream } = require('./stream');
+const { Broadcast, LiveRemux, relayFile, viewerStream } = require('./stream');
 const { Config } = require('./config');
 const xtream = require('./xtream');
 const epg = require('./epg');
@@ -36,7 +36,7 @@ const ui = require('./ui');
 
 // Bump on every change worth verifying in a deploy. Printed at startup so the container log tells
 // you at a glance which build is actually running — no more guessing whether a re-pull took.
-const BUILD = 'viewer-backpressure-grace 2026-09-01';
+const BUILD = 'live-remux-optin 2026-09-01';
 
 const PORT = parseInt(process.env.RELAY_PORT, 10) || 4700;
 const STATE_FILE = process.env.RELAY_STATE_FILE || '/data/relay-state.json';
@@ -280,14 +280,17 @@ async function handlePlay(req, res, kind, parts, bound) {
   if (entry.kind === 'live') {
     let lease;
     try {
+      const remuxLive = !!(session.cfg && session.cfg.remuxLive);
       lease = await session.lease('live:' + streamId, async () => {
         const url = await resolveStream(session, entry);
         // Pass a refresher so the Broadcast mints a fresh play_token each time the source ends the
         // stream (these live tokens last ~20s), keeping one unbroken feed to every viewer instead of
         // dying and forcing each device to reconnect.
         const b = new Broadcast(url, headers, () => resolveStream(session, entry));
+        // remuxLive: run the byte flow through ffmpeg so the edge-swap timestamp discontinuities are
+        // smoothed for strict players (mobile). One ffmpeg per channel, shared across viewers.
+        if (remuxLive) { const rm = new LiveRemux(b); await rm.start(); return rm; }
         await b.start();
-        b.close = b.close.bind(b);
         return b;
       }, { label: entry.name || ('#' + streamId), kind: 'live' });
     } catch (e) {

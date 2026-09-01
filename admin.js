@@ -120,6 +120,7 @@ function lineView(line, session) {
     password: line.password,
     maxConnections: line.maxConnections,
     unmetered: line.unmetered === true,
+    remuxLive: line.remuxLive === true,
     delivery: line.delivery === 'redirect' ? 'redirect' : 'proxy',
     timezone: line.timezone,
     lang: line.lang,

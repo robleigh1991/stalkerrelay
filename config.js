@@ -31,6 +31,9 @@ const DEFAULTS = {
   // refused. `delivery: 'redirect'` hands the edge URL to the device instead of piping the bytes.
   unmetered: false,
   delivery: 'proxy',
+  // Run live through ffmpeg on the relay to smooth edge-swap timestamp discontinuities for strict
+  // players (mobile). Costs CPU per active channel; leave off for desktop-only lines.
+  remuxLive: false,
   epgUrl: '',
   enabled: true,
 };
@@ -90,6 +93,7 @@ function validateLine(input, existing, all) {
   line.maxConnections = mc;
 
   line.unmetered = line.unmetered === true || line.unmetered === 'true' || line.unmetered === '1';
+  line.remuxLive = line.remuxLive === true || line.remuxLive === 'true' || line.remuxLive === '1';
   const delivery = String(line.delivery || 'proxy').trim().toLowerCase();
   line.delivery = delivery === 'redirect' ? 'redirect' : 'proxy';
 

@@ -22,6 +22,9 @@ const https = require('https');
 const { PassThrough } = require('stream');
 const { URL } = require('url');
 const crypto = require('crypto');
+const { spawn } = require('child_process');
+
+const FFMPEG = process.env.RELAY_FFMPEG || 'ffmpeg';
 
 const LEGACY = crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT || 0;
 
@@ -332,6 +335,107 @@ class Broadcast {
 }
 
 /**
+ * Wraps a Broadcast in ffmpeg. The Broadcast fetches the edge, re-opens on expiry and appends each
+ * fresh-token stream to one byte flow — but every edge swap is a TS timestamp discontinuity that a
+ * lenient player (desktop ffmpeg) hides and a strict one (mobile ExoPlayer) chokes on. Feeding that
+ * flow through `ffmpeg -c:v copy` regenerates continuous timestamps, so the device sees one seamless
+ * stream across every swap. One ffmpeg serves all viewers of the channel. Opt-in per line: it costs
+ * CPU per active channel, and players that already tolerate the seam (desktop) don't need it.
+ */
+class LiveRemux {
+  constructor(broadcast) {
+    this.broadcast = broadcast;
+    this.contentType = 'video/mp2t';
+    this.viewers = new Set();
+    this.closed = false;
+    this.ff = null;
+    this.input = null;            // PassThrough the broadcast writes into, piped to ffmpeg stdin
+    this.restarts = 0;
+    this._restartTimer = null;
+    this._outThisRun = 0;
+  }
+
+  async start() {
+    await this.broadcast.start();     // establish the source first — throws if the channel is dead
+    this._spawn();
+    return this;
+  }
+
+  _spawn() {
+    if (this.closed) return;
+    this.input = new PassThrough({ highWaterMark: 8 * 1024 * 1024 });
+    this.broadcast.addViewer(this.input);
+    const args = [
+      '-hide_banner', '-loglevel', 'error',
+      '-fflags', '+genpts+discardcorrupt',
+      '-i', 'pipe:0',
+      '-map', '0:v:0?', '-map', '0:a:0?',
+      '-c:v', 'copy', '-c:a', 'aac', '-ac', '2', '-b:a', '160k', '-ar', '48000', '-sn',
+      '-max_muxing_queue_size', '1024',
+      '-f', 'mpegts', 'pipe:1',
+    ];
+    let ff;
+    try { ff = spawn(FFMPEG, args); }
+    catch (e) { log('live remux ffmpeg spawn failed: ' + ((e && e.message) || e)); return this._scheduleRestart(); }
+    this.ff = ff;
+    this._outThisRun = 0;
+    log('live remux ffmpeg started');
+    this.input.pipe(ff.stdin);
+    ff.stdin.on('error', () => {});   // EPIPE when ffmpeg dies mid-write — harmless
+    ff.stdout.on('data', (c) => {
+      this._outThisRun += c.length;
+      if (this.restarts && this._outThisRun > 512 * 1024) this.restarts = 0;   // healthy run clears backoff
+      for (const v of this.viewers) {
+        if (v.write(c)) { v._slowSince = 0; continue; }
+        const len = v.writableLength;
+        if (len > VIEWER_HARD_MAX) { log('remux viewer buffer ' + Math.round(len / 1048576) + 'MB — dropping'); this.removeViewer(v); }
+        else if (len > VIEWER_SOFT_MAX) {
+          if (!v._slowSince) v._slowSince = Date.now();
+          else if (Date.now() - v._slowSince > VIEWER_SLOW_GRACE_MS) { log('remux viewer too slow — dropping'); this.removeViewer(v); }
+        } else { v._slowSince = 0; }
+      }
+    });
+    ff.stderr.on('data', () => {});   // swallow ffmpeg chatter
+    const onExit = (why) => {
+      if (this.closed) return;
+      log('live remux ffmpeg exited (' + why + ')');
+      try { this.broadcast.removeViewer(this.input); } catch (e) {}
+      this.ff = null;
+      if (this.viewers.size) this._scheduleRestart(); else this.close();
+    };
+    ff.on('exit', (code) => onExit('code ' + code));
+    ff.on('error', (e) => onExit((e && e.code) || 'error'));
+  }
+
+  _scheduleRestart() {
+    if (this.closed || this._restartTimer) return;
+    this.restarts++;
+    if (this.restarts > 12) { log('live remux giving up after ' + this.restarts + ' restarts'); return this.close(); }
+    const wait = Math.min(500 * this.restarts, 5000);
+    this._restartTimer = setTimeout(() => { this._restartTimer = null; if (!this.closed && this.viewers.size) this._spawn(); }, wait);
+  }
+
+  addViewer(stream) { this.viewers.add(stream); log('remux viewer added (viewers=' + this.viewers.size + ')'); }
+  removeViewer(stream) {
+    this.viewers.delete(stream);
+    try { stream.end(); } catch (e) {}
+    log('remux viewer removed (viewers=' + this.viewers.size + ')');
+  }
+
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    if (this._restartTimer) { clearTimeout(this._restartTimer); this._restartTimer = null; }
+    log('live remux closed (viewers=' + this.viewers.size + ')');
+    if (this.ff) { try { this.ff.kill('SIGKILL'); } catch (e) {} this.ff = null; }
+    try { if (this.input) this.input.end(); } catch (e) {}
+    try { this.broadcast.close(); } catch (e) {}
+    for (const v of Array.from(this.viewers)) { try { v.end(); } catch (e) {} }
+    this.viewers.clear();
+  }
+}
+
+/**
  * Relay a FILE (a movie or episode) to one device, resuming by byte offset when the source drops.
  * Not shared: two people watching the same film are at different points, and a file has a real
  * offset to resume from, so each gets its own connection.
@@ -467,4 +571,4 @@ function viewerStream() { return new PassThrough({ highWaterMark: 4 * 1024 * 102
 
 function log(msg) { try { console.log('[stream] ' + msg); } catch (e) {} }
 
-module.exports = { request, requestWithRetry, Broadcast, relayFile, viewerStream };
+module.exports = { request, requestWithRetry, Broadcast, LiveRemux, relayFile, viewerStream };

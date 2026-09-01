@@ -45,6 +45,11 @@ const STILLBORN_BACKOFF = [500, 1000, 2000, 4000, 8000];
 // on a stream that is actually fine.
 const HEALTHY_MS = 10000;
 const HEALTHY_BYTES = 512 * 1024;
+// Per-viewer outbound backpressure. Tolerate a live burst / brief mobile hiccup up to SOFT, drop a
+// viewer only if it stays backed up past the grace window, and hard-drop past HARD for memory safety.
+const VIEWER_SOFT_MAX = 24 * 1024 * 1024;
+const VIEWER_HARD_MAX = 64 * 1024 * 1024;
+const VIEWER_SLOW_GRACE_MS = 12000;
 
 function isTlsError(e) {
   if (!e) return false;
@@ -204,10 +209,24 @@ class Broadcast {
         this.resumes = 0;
       }
       for (const v of this.viewers) {
-        // Never let one slow viewer stall the others or balloon memory: drop it instead.
-        if (!v.write(c) && v.writableLength > 8 * 1024 * 1024) {
-          log('viewer too slow, dropping');
+        // Never let one slow viewer stall the others or balloon memory. But 8 MB (~2-3s of HD) was
+        // far too tight: a live edge often opens with a multi-second burst, and a phone on mobile
+        // data hiccups for a moment — both briefly back the buffer up without the viewer being
+        // genuinely dead. So tolerate a burst (SOFT cap) as long as it drains within a grace window,
+        // drop only when it stays backed up (truly slow) or blows the HARD cap (memory safety).
+        if (v.write(c)) { v._slowSince = 0; continue; }
+        const len = v.writableLength;
+        if (len > VIEWER_HARD_MAX) {
+          log('viewer buffer ' + Math.round(len / 1048576) + 'MB — dropping');
           this.removeViewer(v);
+        } else if (len > VIEWER_SOFT_MAX) {
+          if (!v._slowSince) v._slowSince = Date.now();
+          else if (Date.now() - v._slowSince > VIEWER_SLOW_GRACE_MS) {
+            log('viewer too slow for ' + Math.round((Date.now() - v._slowSince) / 1000) + 's — dropping');
+            this.removeViewer(v);
+          }
+        } else {
+          v._slowSince = 0;   // recovered under the soft cap
         }
       }
     });

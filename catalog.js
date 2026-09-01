@@ -125,7 +125,11 @@ class Catalog {
    */
   idFor(kind, item) {
     const cmd = String((item && item.cmd) || '');
-    const key = kind + '|' + (cmd || (item && item.id) || (item && item.name) || '');
+    // Stalker series episodes all share the season's cmd, so a cmd-only key collapsed every
+    // episode onto one id (byId kept only the last). Append the episode number so each gets its
+    // own id; cmd stays clean because createLink resolves against entry.cmd.
+    const key = kind + '|' + (cmd || (item && item.id) || (item && item.name) || '')
+      + (item && item.seriesEp != null ? '#' + item.seriesEp : '');
     let id = this.idByKey.get(key);
     if (!id) {
       id = this.nextId++;

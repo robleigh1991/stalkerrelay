@@ -205,6 +205,9 @@ class SessionPool {
 
   load(profiles) {
     const wanted = new Set();
+    // Only the sessions actually created or reconnected here. Callers connect and warm what this
+    // returns, so an edit to one line must not drag every other line's catalogue into a rebuild.
+    const changed = [];
     (profiles || []).forEach((p) => {
       const id = String(p.id != null ? p.id : p.mac);
       wanted.add(id);
@@ -217,12 +220,14 @@ class SessionPool {
         return;
       }
       if (existing) existing.stop();
-      this.sessions.set(id, new Session(Object.assign({}, p, { id: id })));
+      const s = new Session(Object.assign({}, p, { id: id }));
+      this.sessions.set(id, s);
+      changed.push(s);
     });
     for (const [id, s] of Array.from(this.sessions.entries())) {
       if (!wanted.has(id)) { s.stop(); this.sessions.delete(id); }
     }
-    return this.list();
+    return changed;
   }
 
   get(id) { return this.sessions.get(String(id)) || null; }

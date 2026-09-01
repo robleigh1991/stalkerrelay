@@ -59,8 +59,10 @@ function log(msg) { try { console.log('[relay] ' + msg); } catch (e) {} }
  */
 function applyConfig() {
   const lines = config.lines().filter((l) => l.enabled !== false);
-  const sessions = pool.load(lines);
-  sessions.forEach((s) => {
+  // Only the sessions pool.load actually created or reconnected — so adding or editing one line
+  // connects and warms that line alone and leaves every other line's catalogue untouched.
+  const started = pool.load(lines);
+  started.forEach((s) => {
     if (!s.catalog) s.catalog = new Catalog(s);
     // Connect eagerly: the portal session is the scarce resource, so it is established once at
     // start rather than during someone's first channel change.
@@ -74,7 +76,7 @@ function applyConfig() {
   hydrateState();
   hydrateCatalogs();
   syncLineServers(lines);
-  return sessions;
+  return started;
 }
 
 /** Start, move, and stop the per-line listeners to match the config. */

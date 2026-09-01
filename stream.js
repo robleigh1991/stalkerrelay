@@ -37,7 +37,10 @@ const RETRY_5XX = [400, 1200, 2500, 4000];
 const MIN_ALIVE_MS = 4000;
 const MIN_ALIVE_BYTES = 64 * 1024;
 const STILLBORN_BACKOFF = [500, 1000, 2000, 4000, 8000];
-const HEALTHY_MS = 20000;
+// Live sources here hand out ~20s of stream per play_token then end cleanly. Each segment IS a
+// healthy run, so the reset must fire inside one segment or the resume counter marches to the cap
+// on a stream that is actually fine.
+const HEALTHY_MS = 10000;
 const HEALTHY_BYTES = 512 * 1024;
 
 function isTlsError(e) {
@@ -135,9 +138,14 @@ function requestWithRetry(target, headers, opts, cb, attempt) {
  * to, and holding one would mean buffering the whole thing in memory.
  */
 class Broadcast {
-  constructor(target, headers) {
+  // `refresh` (optional): async () => a fresh play URL. A live play_token is short-lived — the
+  // source ends the stream when it expires — so re-opening the same URL just replays a dead token.
+  // With refresh, each re-open mints a new link (like the desktop proxy, which re-hits the relay
+  // for a fresh token every time), keeping one unbroken byte stream to the viewers.
+  constructor(target, headers, refresh) {
     this.target = target;
     this.headers = headers || {};
+    this.refresh = refresh || null;
     this.viewers = new Set();
     this.upstream = null;
     this.closed = false;
@@ -226,18 +234,29 @@ class Broadcast {
     if (tries === 0) this.resumes++;
     log('upstream ' + why + ' — re-opening (' + this.resumes + '/' + RESUME_MAX + ')');
 
-    requestWithRetry(this.target, this.headers, {}, (err, res) => {
-      if (this.closed) { if (res) res.destroy(); return; }
-      if (err || !res || res.statusCode >= 400) {
-        if (res) res.resume();
-        if (tries < REOPEN_BACKOFF.length) {
-          return setTimeout(() => this._reopen(why, tries + 1), REOPEN_BACKOFF[tries]);
+    const attempt = (target) => {
+      requestWithRetry(target, this.headers, {}, (err, res) => {
+        if (this.closed) { if (res) res.destroy(); return; }
+        if (err || !res || res.statusCode >= 400) {
+          if (res) res.resume();
+          if (tries < REOPEN_BACKOFF.length) {
+            return setTimeout(() => this._reopen(why, tries + 1), REOPEN_BACKOFF[tries]);
+          }
+          log('source will not come back');
+          return this.close();
         }
-        log('source will not come back');
-        return this.close();
-      }
-      this._attachUpstream(res);
-    });
+        this._attachUpstream(res);
+      });
+    };
+
+    // Mint a fresh play_token for each re-open when we can — the old one is why the source ended.
+    if (this.refresh) {
+      this.refresh()
+        .then((u) => { if (!this.closed) { if (u) this.target = u; attempt(this.target); } })
+        .catch(() => { if (!this.closed) attempt(this.target); });
+    } else {
+      attempt(this.target);
+    }
   }
 
   addViewer(stream) { this.viewers.add(stream); }

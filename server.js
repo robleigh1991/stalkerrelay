@@ -275,7 +275,10 @@ async function handlePlay(req, res, kind, parts, bound) {
     try {
       lease = await session.lease('live:' + streamId, async () => {
         const url = await resolveStream(session, entry);
-        const b = new Broadcast(url, headers);
+        // Pass a refresher so the Broadcast mints a fresh play_token each time the source ends the
+        // stream (these live tokens last ~20s), keeping one unbroken feed to every viewer instead of
+        // dying and forcing each device to reconnect.
+        const b = new Broadcast(url, headers, () => resolveStream(session, entry));
         await b.start();
         b.close = b.close.bind(b);
         return b;

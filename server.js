@@ -252,7 +252,12 @@ async function handlePlay(req, res, kind, parts, bound) {
   // byte path entirely. The relay still brokers the single portal auth; the device streams the edge
   // directly. Only safe when the edge is reachable from the device and its token isn't IP-locked to
   // the relay — otherwise use proxy delivery. No lease is taken: the relay carries no bytes here.
-  if ((session.cfg && session.cfg.delivery) === 'redirect') {
+  //
+  // FILES ONLY. A live stream is continuous and drops constantly; the device would hit end-of-stream
+  // and have to re-request a fresh token each time ("pieces"). Live always goes through the Broadcast
+  // path below, which holds the upstream open and re-opens on drops into one unbroken stream — so we
+  // never redirect live even on a redirect line.
+  if ((session.cfg && session.cfg.delivery) === 'redirect' && entry.kind !== 'live') {
     let url;
     try { url = await resolveCached(session, entry, streamId); }
     catch (e) { return text(res, 502, 'could not get a link: ' + ((e && e.message) || e)); }

@@ -37,7 +37,7 @@ const ui = require('./ui');
 
 // Bump on every change worth verifying in a deploy. Printed at startup so the container log tells
 // you at a glance which build is actually running — no more guessing whether a re-pull took.
-const BUILD = 'hls-selfheal+visible 2026-09-01';
+const BUILD = 'hls-wide-window 2026-09-02';
 
 const hls = new HlsManager();
 

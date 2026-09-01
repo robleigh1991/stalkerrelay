@@ -29,6 +29,7 @@ const { SessionPool } = require('./session');
 const { Catalog } = require('./catalog');
 const { Broadcast, LiveRemux, relayFile, viewerStream } = require('./stream');
 const { Config } = require('./config');
+const { HlsManager } = require('./hls');
 const xtream = require('./xtream');
 const epg = require('./epg');
 const admin = require('./admin');
@@ -36,7 +37,9 @@ const ui = require('./ui');
 
 // Bump on every change worth verifying in a deploy. Printed at startup so the container log tells
 // you at a glance which build is actually running — no more guessing whether a re-pull took.
-const BUILD = 'live-remux-lowlatency 2026-09-01';
+const BUILD = 'hls-live-mobile 2026-09-01';
+
+const hls = new HlsManager();
 
 const PORT = parseInt(process.env.RELAY_PORT, 10) || 4700;
 const STATE_FILE = process.env.RELAY_STATE_FILE || '/data/relay-state.json';
@@ -354,6 +357,65 @@ async function handlePlay(req, res, kind, parts, bound) {
   relayFile(url, headers, req, res);
 }
 
+// HLS live for mobile: /live/<user>/<pass>/<streamId>/index.m3u8 and .../seg_N.ts. One ffmpeg per
+// channel turns the chunked source into a rolling segment playlist ExoPlayer can buffer across —
+// the seams that break progressive TS on mobile. Desktop never comes here; it keeps the .ts path.
+async function handleHls(req, res, parts, bound) {
+  const user = decodeURIComponent(parts[1] || '');
+  const pass = decodeURIComponent(parts[2] || '');
+  const streamId = String(parts[3] || '');
+  const file = parts[4];
+
+  const session = xtream.sessionFor(pool, bound, user);
+  if (!session || !xtream.authOk(session, pass)) {
+    xtream.logDenial(pool, bound, user, 'hls');
+    return text(res, 401, 'unauthorized');
+  }
+
+  const key = session.id + ':' + streamId;
+
+  // Segment: the session must already exist (the playlist request created it). Just serve the file.
+  if (file !== 'index.m3u8') {
+    const s = hls.peek(key);
+    if (!s) return text(res, 404, 'no active HLS session');
+    return serveFile(res, path.join(s.dir, path.basename(file)), 'video/mp2t');
+  }
+
+  // Playlist: ensure the portal is up, spawn ffmpeg on the first hit, then serve index.m3u8.
+  try { await session.ensure(); }
+  catch (e) { return text(res, 503, 'portal unavailable: ' + ((e && e.message) || e)); }
+
+  const entry = session.catalog.resolve(streamId);
+  if (!entry || entry.kind !== 'live') return text(res, 404, 'unknown live stream id ' + streamId);
+
+  const headers = session.client.streamContext ? headersFrom(session.client.streamContext()) : {};
+  let s;
+  try {
+    s = await hls.get(key, async () => {
+      const url = await resolveStream(session, entry);
+      return new Broadcast(url, headers, () => resolveStream(session, entry));
+    });
+  } catch (e) {
+    return text(res, 502, 'could not start HLS: ' + ((e && e.message) || e));
+  }
+  return serveFile(res, s.playlistPath(), 'application/vnd.apple.mpegurl');
+}
+
+function serveFile(res, filePath, contentType) {
+  fs.stat(filePath, (err, st) => {
+    if (err || !st.isFile()) return text(res, 404, 'not found');
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Content-Length': st.size,
+      'Cache-Control': 'no-cache',
+      'Access-Control-Allow-Origin': '*',
+    });
+    const rs = fs.createReadStream(filePath);
+    rs.on('error', () => { try { res.destroy(); } catch (e) {} });
+    rs.pipe(res);
+  });
+}
+
 function headersFrom(ctx) {
   const h = {};
   if (!ctx) return h;
@@ -420,6 +482,13 @@ async function handler(req, res, opts) {
     }
     if (p === '/xmltv.php' || p === '/epg.xml') {
       return await epg.serve(req, res, url, pool, bound);
+    }
+    // HLS live: /live/<user>/<pass>/<streamId>/index.m3u8  and  .../<streamId>/seg_N.ts
+    // Five parts, the last being the playlist or a segment. The streamId sits in its own path segment
+    // so the player resolves segment names relative to it without collisions.
+    if (parts[0] === 'live' && parts.length === 5 &&
+        (parts[4] === 'index.m3u8' || /^seg_\d+\.ts$/.test(parts[4]))) {
+      return await handleHls(req, res, parts, bound);
     }
     if (parts.length >= 4 && ['live', 'movie', 'series'].indexOf(parts[0]) >= 0) {
       return await handlePlay(req, res, parts[0], parts, bound);

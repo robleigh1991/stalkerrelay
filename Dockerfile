@@ -17,7 +17,11 @@ ENV RELAY_PORT=4700 \
     RELAY_CATALOG_FILE=/data/relay-catalog.json \
     RELAY_PORT_MIN=4701 \
     RELAY_PORT_MAX=4720 \
-    NODE_ENV=production
+    NODE_ENV=production \
+    # A very large line (100k+ catalogue items across live/films/series) holds the whole listing in
+    # memory so devices never pay for a page-walk. That plus serialisation spikes on state-save can
+    # exceed Node's ~2GB default heap while warming. Give it headroom; raise further for huge lines.
+    NODE_OPTIONS=--max-old-space-size=4096
 
 # Stream ids and the portal catalogue live here. Without a volume, every restart reissues ids and
 # breaks the favourites your players have already saved.

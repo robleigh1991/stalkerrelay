@@ -8,7 +8,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "start": "node server.js",
+    "start": "node --max-old-space-size=4096 server.js",
     "test": "node test-relay.js && node test-dashboard.js && node test-catalog.js"
   },
   "dependencies": {}

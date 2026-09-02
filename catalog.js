@@ -135,7 +135,15 @@ class Catalog {
       id = this.nextId++;
       this.idByKey.set(key, id);
     }
-    this.byId.set(id, { kind: kind, cmd: cmd, name: (item && item.name) || '', item: item });
+    // Keep ONLY the fields playback/EPG/episode resolution ever reads back (id, movieId, seriesEp) —
+    // never the heavy display strings (description, actors, poster, genre, …). Those already live in
+    // the cached listing arrays; holding a second full copy per id here, and re-serialising it on
+    // every 60s state save, is what pushed a ~95k-item line past Node's default heap while warming.
+    const it = item || {};
+    this.byId.set(id, {
+      kind: kind, cmd: cmd, name: it.name || '',
+      item: { id: it.id, movieId: it.movieId, seriesEp: it.seriesEp },
+    });
     return id;
   }
 

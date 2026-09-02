@@ -304,7 +304,8 @@ class StalkerClient {
       number: c.number,
       logo: c.logo ? this._logo(c.logo) : '',
       cmd: c.cmd || (Array.isArray(c.cmds) && c.cmds[0] && (c.cmds[0].cmd || c.cmds[0].url)) || '',
-      cmds: c.cmds,
+      // Don't retain the raw `cmds` array — it's only read right here to derive `cmd`, and keeping
+      // an array of objects per channel across the whole line is pure waste.
       genreId: String(c.tv_genre_id || ''),
       archive: c.tv_archive_duration || 0,
       epgId: c.xmltv_id || ''
@@ -381,25 +382,23 @@ class StalkerClient {
 
   _vodParse(r) {
     const js = (r && r.js) || {};
+    // Keep ONLY what the Xtream façade actually serves for a listing (name/poster/year/rating) plus
+    // what playback needs (id/cmd). Plot descriptions, cast, director, original name, genre and
+    // runtime are parsed by nothing downstream — the relay has no get_vod_info endpoint — but a
+    // ~70k-film line kept all of them in memory (a plot + actor list is 1-3KB each), which is what
+    // ran the heap to 2GB while warming. Episodes are re-fetched fresh in Catalog.episodes(), so the
+    // per-item `series` array isn't retained either; only the cheap isSeries flag survives.
     const data = (js.data || []).map((m) => ({
       id: String(m.id),
       name: m.name,
-      oname: m.o_name,
-      description: m.description,
       poster: m.screenshot_uri ? this._poster(m.screenshot_uri) : (m.poster_url || ''),
       year: m.year,
       rating: m.rating_imdb || m.rating_kinopoisk || '',
-      genre: m.genres_str || '',
-      director: m.director || '',
-      actors: m.actors || '',
-      time: m.time || '',
       cmd: m.cmd,
       // NB: m.series is an ARRAY of episode numbers and the portal sends [] for plain movies.
       // `!!m.series` was therefore true for everything ([] is truthy in JS), flagging every movie
       // as a series. Require a non-empty array.
       isSeries: String(m.is_series || '0') === '1' || (Array.isArray(m.series) && m.series.length > 0),
-      seasons: m.series || [],
-      episodes: m.series || []
     }));
     return { items: data, total: parseInt(js.total_items || data.length, 10), perPage: parseInt(js.max_page_items || 14, 10) };
   }

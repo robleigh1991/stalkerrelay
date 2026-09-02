@@ -33,6 +33,10 @@ services:
 
       RELAY_TZ: "${RELAY_TZ:-Europe/London}"
 
+      # Node heap ceiling. A very large line (100k+ catalogue items) holds the whole listing in
+      # memory and can exceed Node's ~2GB default while warming. Raise for huge lines / many lines.
+      NODE_OPTIONS: "${RELAY_NODE_OPTIONS:---max-old-space-size=4096}"
+
     volumes:
       # Holds config.json (your lines) and relay-state.json (stream ids). Losing this means
       # re-adding every line, and every saved favourite in every player pointing somewhere new.

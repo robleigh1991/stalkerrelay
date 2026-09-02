@@ -22,6 +22,8 @@ services:
       RELAY_PORT_MIN: "4701"
       RELAY_PORT_MAX: "4720"
       RELAY_TZ: "Europe/London"
+      # Raise for very large lines (100k+ catalogue items) that exceed Node's ~2GB default heap.
+      NODE_OPTIONS: "--max-old-space-size=4096"
     volumes:
       - relay_data:/data
 

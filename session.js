@@ -158,6 +158,10 @@ class Session {
     this._stopped = true;
     if (this.keepAlive) { clearInterval(this.keepAlive); this.keepAlive = null; }
     if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+    // Stop the catalogue walk too. It's attached externally (server.js) and its warm loop only checks
+    // its OWN _stopped flag, so without this an edited/removed line leaves an orphaned page-walk
+    // building a full listing in memory — repeat that a few times on a big line and the heap blows.
+    if (this.catalog && typeof this.catalog.stop === 'function') { try { this.catalog.stop(); } catch (e) {} }
     for (const lease of Array.from(this.leases.values())) this._closeLease(lease, 'session stopped');
     this.connected = false;
   }

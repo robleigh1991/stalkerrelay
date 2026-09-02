@@ -342,23 +342,28 @@ class Catalog {
       await this.vodCategories().catch(() => []);
       await this.seriesCategories().catch(() => []);
 
+      // Only walk a list we have NOTHING for — `_stale`, not `_get(…, LIST_TTL)`. A catalogue
+      // restored from disk keeps its original (old) timestamp, so a freshness check reads it as
+      // stale and re-walked the entire portal on every restart. Warm is the FIRST build; keeping
+      // an existing catalogue current is the job of the on-demand refresh (a device request past
+      // the TTL) and the explicit Rebuild button (which clear()s first, so there's nothing here).
       // Live first: it is what someone opens the app to watch.
       step('live channels');
-      if (!this._get('live:all', LIST_TTL)) {
+      if (!this._stale('live:all')) {
         const live = await this._walkLive(onProgress);
         this._put('live:all', live);
         log(this, 'warmed ' + live.length + ' live channels');
       }
 
       step('films');
-      if (!this._get('vod:*', LIST_TTL)) {
+      if (!this._stale('vod:*')) {
         const vod = await this._walkList('vod', '*', onProgress);
         this._put('vod:*', vod);
         log(this, 'warmed ' + vod.length + ' films');
       }
 
       step('series');
-      if (!this._get('series:*', LIST_TTL)) {
+      if (!this._stale('series:*')) {
         const series = await this._walkList('series', '*', onProgress);
         this._put('series:*', series);
         log(this, 'warmed ' + series.length + ' series');

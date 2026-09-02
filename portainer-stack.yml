@@ -36,10 +36,6 @@ services:
 
       RELAY_TZ: "Europe/London"
 
-      # Node heap ceiling — raise for very large lines (100k+ catalogue items) that otherwise exceed
-      # Node's ~2GB default while warming.
-      NODE_OPTIONS: "--max-old-space-size=4096"
-
     volumes:
       # config.json (your lines, and the hashed dashboard password) and relay-state.json (stream
       # ids). Lose this and you re-add every line, and every favourite saved in every player points

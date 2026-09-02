@@ -129,6 +129,7 @@ function lineView(line, session) {
     enabled: line.enabled !== false,
     status: session ? {
       connected: !!session.connected,
+      reconnecting: !!session.reconnecting,
       error: session.lastError || null,
       active: session.activeConnections,
       // [{ key, viewers }] — a fanned-out channel shows one entry with several viewers, which is

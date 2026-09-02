@@ -5,6 +5,11 @@
  * It lives in a .js file rather than a .html one so the Dockerfile's `COPY *.js` keeps working and
  * there is no static directory to get out of step with the image.
  *
+ * Layout is a master/detail: a scrolling sidebar lists every line (with a health summary and a
+ * search/filter pinned at its top), and the pane on the right shows the selected line in full. This
+ * is what keeps the page usable once there are dozens of lines — the old one-tall-card-per-line
+ * stack turned into an endless scroll with no overview.
+ *
  * Every value that came from configuration or from a portal is put on the page with textContent,
  * never innerHTML. Channel and line names are attacker-influenced in the general case, and an
  * innerHTML assignment here would execute inside an authenticated admin session.
@@ -23,19 +28,18 @@ const PAGE = `<!DOCTYPE html>
     --warn: #e6a13c;
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
     margin: 0; background: var(--bg); color: var(--fg);
     font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
   a { color: var(--accent); }
   header {
-    display: flex; align-items: center; gap: 12px;
+    display: flex; align-items: center; gap: 12px; flex: none;
     padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
-    position: sticky; top: 0; z-index: 5;
   }
   header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; }
   header .sp { flex: 1; }
-  main { padding: 20px; max-width: 1100px; margin: 0 auto; }
 
   button {
     font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--line);
@@ -56,34 +60,84 @@ const PAGE = `<!DOCTYPE html>
   label span.lbl { display: block; font-size: 12px; color: var(--dim); margin-bottom: 4px; }
   label span.hint { display: block; font-size: 12px; color: var(--dim); margin-top: 4px; }
 
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); flex: none; }
+  .dot.on { background: var(--ok); }
+  .dot.off { background: var(--bad); }
+  .dot.recon { background: var(--warn); animation: pulse 1.1s ease-in-out infinite; }
+  .dot.dis { background: var(--dim); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+
+  /* ---- master / detail shell ---- */
+  .shell { display: flex; flex-direction: column; height: 100vh; }
+  .layout { flex: 1; display: flex; min-height: 0; }
+
+  .sidebar {
+    width: 320px; flex: none; display: flex; flex-direction: column;
+    border-right: 1px solid var(--line); background: var(--panel); overflow: hidden;
+  }
+  .side-top { padding: 12px; border-bottom: 1px solid var(--line); flex: none; }
+  .summary { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .chip {
+    font-size: 12px; padding: 3px 9px; border-radius: 20px; background: var(--panel2);
+    border: 1px solid var(--line); color: var(--dim); white-space: nowrap;
+  }
+  .chip b { color: var(--fg); font-weight: 600; }
+  .chip.ok b { color: var(--ok); }
+  .chip.bad b { color: var(--bad); }
+  .chip.live b { color: var(--accent); }
+  .filters { display: flex; gap: 6px; margin-top: 8px; }
+  .filters button { flex: 1; padding: 5px 0; font-size: 12px; }
+  .filters button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  .side-list { flex: 1; overflow-y: auto; }
+  .lineitem {
+    display: flex; align-items: center; gap: 10px; padding: 11px 14px; cursor: pointer;
+    border-bottom: 1px solid var(--line); border-left: 3px solid transparent;
+  }
+  .lineitem:hover { background: var(--panel2); }
+  .lineitem.sel { background: var(--panel2); border-left-color: var(--accent); }
+  .lineitem .body { min-width: 0; flex: 1; }
+  .lineitem .nm { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .lineitem .meta {
+    font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+  }
+  .lineitem .live { font-size: 12px; color: var(--accent); flex: none; font-variant-numeric: tabular-nums; }
+  .side-empty { padding: 30px 16px; color: var(--dim); text-align: center; font-size: 13px; }
+
+  /* ---- detail pane ---- */
+  .detail { flex: 1; overflow-y: auto; min-width: 0; }
+  .detail .pad { padding: 22px; max-width: 760px; }
+  .detail .placeholder { color: var(--dim); text-align: center; padding: 60px 20px; }
+  .dhead { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .dhead h2 { font-size: 20px; margin: 0; font-weight: 600; }
+  .dhead .badge { font-size: 12px; color: var(--dim); }
+  .dsub { color: var(--dim); font-size: 13px; margin-bottom: 18px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+
   .card {
     background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
     padding: 16px; margin-bottom: 14px;
   }
-  .card .top { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
   .card h2 { font-size: 16px; margin: 0; font-weight: 600; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); flex: none; }
-  .dot.on { background: var(--ok); }
-  .dot.off { background: var(--bad); }
-  .dot.idle { background: var(--warn); }
 
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
   .kv .k { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--dim); }
   .kv .v { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; word-break: break-all; }
 
-  .urls { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
-  .urlrow { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .urls { display: grid; gap: 6px; }
+  .urlrow { display: flex; align-items: center; gap: 8px; }
   .urlrow .lab { font-size: 12px; color: var(--dim); min-width: 74px; }
   .urlrow code {
     flex: 1; font-size: 12px; background: var(--bg); padding: 5px 8px; border-radius: 6px;
     border: 1px solid var(--line); overflow-x: auto; white-space: nowrap;
   }
-  .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .actions { display: flex; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
 
-  .streams { margin-top: 10px; font-size: 13px; color: var(--dim); }
-  .streams div { font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .streams { font-size: 13px; color: var(--dim); }
+  .streams .hd { margin-bottom: 6px; }
+  .streams .row { font-family: ui-monospace, Menlo, Consolas, monospace; }
 
-  .empty { text-align: center; padding: 50px 20px; color: var(--dim); }
+  .sec-title { font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--dim); margin: 0 0 10px; }
 
   dialog {
     border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--fg);
@@ -104,14 +158,21 @@ const PAGE = `<!DOCTYPE html>
   .msg.err { background: rgba(239,90,90,.13); color: #ff9d9d; border: 1px solid rgba(239,90,90,.3); }
   .msg.ok  { background: rgba(53,192,127,.12); color: #7ee2b0; border: 1px solid rgba(53,192,127,.3); }
 
-  .login { max-width: 340px; margin: 14vh auto; }
+  .login { max-width: 340px; margin: 14vh auto; padding: 0 16px; }
+  .login .card { padding: 20px; }
   .toast {
     position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
     background: var(--panel2); border: 1px solid var(--line); padding: 9px 16px;
     border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity .18s; pointer-events: none;
+    z-index: 50;
   }
   .toast.show { opacity: 1; }
-  @media (max-width: 560px) { .two { grid-template-columns: 1fr; } }
+
+  @media (max-width: 720px) {
+    .layout { flex-direction: column; }
+    .sidebar { width: 100%; height: auto; max-height: 46vh; border-right: none; border-bottom: 1px solid var(--line); }
+    .two { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
@@ -218,7 +279,10 @@ const PAGE = `<!DOCTYPE html>
   'use strict';
 
   var app = document.getElementById('app');
-  var state = { lines: [], portRange: [4701, 4720], editing: null, refresh: null };
+  var state = {
+    lines: [], portRange: [4701, 4720], editing: null, refresh: null,
+    selected: null, filter: 'all', query: '',
+  };
 
   // ---- tiny DOM helpers ------------------------------------------------------------------
   // el() never takes markup. Text goes in as text, always — a line named after a channel could
@@ -319,10 +383,12 @@ const PAGE = `<!DOCTYPE html>
     setTimeout(function () { inp.focus(); }, 0);
   }
 
-  // ---- main --------------------------------------------------------------------------------
+  // ---- shell (built once) ------------------------------------------------------------------
 
   function renderApp() {
     clear(app);
+
+    var shell = el('div', 'shell');
 
     var head = el('header');
     head.appendChild(el('h1', null, 'Relay'));
@@ -344,60 +410,202 @@ const PAGE = `<!DOCTYPE html>
       });
     });
     head.appendChild(out);
-    app.appendChild(head);
+    shell.appendChild(head);
 
-    var main = el('main');
-    main.id = 'main';
-    app.appendChild(main);
-    renderLines();
+    var layout = el('div', 'layout');
+
+    // Sidebar: summary + search + filters (built once), then the scrolling list.
+    var side = el('div', 'sidebar');
+    var top = el('div', 'side-top');
+    var summary = el('div', 'summary'); summary.id = 'summary';
+    top.appendChild(summary);
+
+    var search = document.createElement('input');
+    search.id = 'searchInput';
+    search.placeholder = 'Search lines…';
+    search.value = state.query;
+    search.addEventListener('input', function () { state.query = search.value; renderList(); });
+    top.appendChild(search);
+
+    var filters = el('div', 'filters');
+    ['all', 'connected', 'errored'].forEach(function (f) {
+      var b = el('button', 'filt' + (state.filter === f ? ' active' : ''),
+        f === 'all' ? 'All' : (f === 'connected' ? 'Up' : 'Errored'));
+      b.dataset.f = f;
+      b.addEventListener('click', function () {
+        state.filter = f;
+        Array.prototype.forEach.call(filters.children, function (c) {
+          c.classList.toggle('active', c.dataset.f === f);
+        });
+        renderList();
+      });
+      filters.appendChild(b);
+    });
+    top.appendChild(filters);
+    side.appendChild(top);
+
+    var list = el('div', 'side-list'); list.id = 'linelist';
+    side.appendChild(list);
+    layout.appendChild(side);
+
+    var detail = el('div', 'detail'); detail.id = 'detail';
+    layout.appendChild(detail);
+
+    shell.appendChild(layout);
+    app.appendChild(shell);
+
+    renderData();
   }
 
-  function renderLines() {
-    var main = document.getElementById('main');
-    if (!main) return;
-    clear(main);
+  // ---- data-driven render (on every refresh) ----------------------------------------------
+
+  function statusOf(l) {
+    if (!l.enabled) return { cls: 'dis', label: 'disabled' };
+    if (l.status && l.status.reconnecting) return { cls: 'recon', label: 'reconnecting' };
+    if (l.status && l.status.connected) return { cls: 'on', label: 'connected' };
+    return { cls: 'off', label: l.status && l.status.error ? 'error' : 'not connected' };
+  }
+
+  function liveCount(l) {
+    var streams = (l.status && l.status.streams) || [];
+    var live = 0, files = 0;
+    streams.forEach(function (s) { if (s.kind === 'live') live += (s.viewers || 1); else files++; });
+    return { live: live, files: files };
+  }
+
+  function matchesFilter(l) {
+    if (state.query) {
+      var q = state.query.toLowerCase();
+      var hay = ((l.name || '') + ' ' + (l.portal || '') + ' ' + (l.mac || '')).toLowerCase();
+      if (hay.indexOf(q) === -1) return false;
+    }
+    if (state.filter === 'connected') return l.enabled && l.status && l.status.connected;
+    if (state.filter === 'errored') {
+      return l.enabled && l.status && !l.status.connected;   // includes reconnecting + hard error
+    }
+    return true;
+  }
+
+  function renderData() {
+    // Keep a valid selection across refreshes; default to the first line.
+    if (state.lines.length) {
+      var stillThere = state.lines.some(function (l) { return l.id === state.selected; });
+      if (!stillThere) state.selected = state.lines[0].id;
+    } else {
+      state.selected = null;
+    }
+    renderSummary();
+    renderList();
+    renderDetail();
+  }
+
+  function renderSummary() {
+    var box = document.getElementById('summary');
+    if (!box) return;
+    clear(box);
+    var total = state.lines.length;
+    var up = 0, bad = 0, live = 0;
+    state.lines.forEach(function (l) {
+      if (l.enabled && l.status && l.status.connected) up++;
+      if (l.enabled && l.status && !l.status.connected) bad++;
+      live += liveCount(l).live;
+    });
+    box.appendChild(chip(null, total, total === 1 ? 'line' : 'lines'));
+    box.appendChild(chip('ok', up, 'up'));
+    if (bad) box.appendChild(chip('bad', bad, 'down'));
+    box.appendChild(chip('live', live, 'live'));
+  }
+
+  function chip(cls, n, label) {
+    var c = el('div', 'chip' + (cls ? ' ' + cls : ''));
+    c.appendChild(el('b', null, n));
+    c.appendChild(document.createTextNode(' ' + label));
+    return c;
+  }
+
+  function renderList() {
+    var list = document.getElementById('linelist');
+    if (!list) return;
+    clear(list);
 
     if (!state.lines.length) {
-      var e = el('div', 'empty');
-      e.appendChild(el('p', null, 'No lines yet.'));
-      e.appendChild(el('p', null, 'Add one and point your players at it.'));
-      main.appendChild(e);
+      var e = el('div', 'side-empty');
+      e.appendChild(el('div', null, 'No lines yet.'));
+      e.appendChild(el('div', null, 'Add one to get started.'));
+      list.appendChild(e);
       return;
     }
-    state.lines.forEach(function (l) { main.appendChild(lineCard(l)); });
-  }
 
-  function lineCard(l) {
-    var card = el('div', 'card');
-
-    var top = el('div', 'top');
-    var dot = el('div', 'dot');
-    dot.className = 'dot ' + (!l.enabled ? 'idle' : (l.status.connected ? 'on' : 'off'));
-    top.appendChild(dot);
-    top.appendChild(el('h2', null, l.name));
-    top.appendChild(el('div', 'sp'));
-    var badge = el('span', null, !l.enabled ? 'disabled'
-      : (l.status.connected ? 'connected' : 'not connected'));
-    badge.style.fontSize = '12px';
-    badge.style.color = 'var(--dim)';
-    top.appendChild(badge);
-    card.appendChild(top);
-
-    if (l.status.error) {
-      var em = el('div', 'msg err show', l.status.error);
-      card.appendChild(em);
+    var shown = state.lines.filter(matchesFilter);
+    if (!shown.length) {
+      list.appendChild(el('div', 'side-empty', 'No lines match.'));
+      return;
     }
 
+    shown.forEach(function (l) {
+      var st = statusOf(l);
+      var item = el('div', 'lineitem' + (l.id === state.selected ? ' sel' : ''));
+      item.appendChild(el('div', 'dot ' + st.cls));
+
+      var body = el('div', 'body');
+      body.appendChild(el('div', 'nm', l.name || '(unnamed)'));
+      var lc = liveCount(l);
+      var conns = (l.status ? l.status.active : 0) + '/' + l.maxConnections;
+      body.appendChild(el('div', 'meta', hostOf(l.portal) + ' · ' + conns));
+      item.appendChild(body);
+
+      if (lc.live) item.appendChild(el('div', 'live', '● ' + lc.live));
+      else if (lc.files) item.appendChild(el('div', 'live', '▶ ' + lc.files));
+
+      item.addEventListener('click', function () {
+        state.selected = l.id;
+        renderList();
+        renderDetail();
+      });
+      list.appendChild(item);
+    });
+  }
+
+  function renderDetail() {
+    var pane = document.getElementById('detail');
+    if (!pane) return;
+    clear(pane);
+
+    var l = state.lines.filter(function (x) { return x.id === state.selected; })[0];
+    if (!l) {
+      pane.appendChild(el('div', 'placeholder', state.lines.length ? 'Select a line.' : 'Add a line to get started.'));
+      return;
+    }
+
+    var pad = el('div', 'pad');
+    var st = statusOf(l);
+
+    var head = el('div', 'dhead');
+    head.appendChild(el('div', 'dot ' + st.cls));
+    head.appendChild(el('h2', null, l.name || '(unnamed)'));
+    var spacer = el('div');
+    spacer.style.flex = '1';
+    head.appendChild(spacer);
+    head.appendChild(el('div', 'badge', st.label));
+    pad.appendChild(head);
+
+    pad.appendChild(el('div', 'dsub', hostOf(l.portal) + ' · ' + (l.mac || '')));
+
+    if (l.status && l.status.error && !l.status.connected) {
+      pad.appendChild(el('div', 'msg err show', l.status.error));
+    }
+
+    // Overview card
+    var ov = el('div', 'card');
     var grid = el('div', 'grid');
     grid.appendChild(kv('Portal', hostOf(l.portal)));
     grid.appendChild(kv('MAC', l.mac));
     grid.appendChild(kv('Port', l.port ? String(l.port) : 'shared'));
-    grid.appendChild(kv('Connections', l.status.active + ' / ' + l.maxConnections));
-    card.appendChild(grid);
+    grid.appendChild(kv('Connections', (l.status ? l.status.active : 0) + ' / ' + l.maxConnections));
+    grid.appendChild(kv('Delivery', l.delivery || 'proxy'));
+    ov.appendChild(grid);
 
-    // Catalogue state. Without this, a line shows "connected" while players still see empty
-    // categories, because the first walk of a big line takes minutes.
-    var c = l.status.catalog;
+    var c = l.status && l.status.catalog;
     if (c) {
       var cg = el('div', 'grid');
       cg.style.marginTop = '12px';
@@ -407,37 +615,44 @@ const PAGE = `<!DOCTYPE html>
       cg.appendChild(kv('Catalogue', c.warming
         ? ('building — ' + c.step + ' (' + (c.items || 0) + ')')
         : (c.error ? c.error : (c.done ? 'ready' : (c.step || 'idle')))));
-      card.appendChild(cg);
+      ov.appendChild(cg);
     }
+    pad.appendChild(ov);
 
-    if (l.status.streams && l.status.streams.length) {
-      var st = el('div', 'streams');
-      st.appendChild(el('div', null, 'Playing now:'));
+    // Playing now
+    if (l.status && l.status.streams && l.status.streams.length) {
+      var sc = el('div', 'card');
+      var st2 = el('div', 'streams');
+      st2.appendChild(el('div', 'hd', 'Playing now'));
       l.status.streams.forEach(function (s) {
-        // The name, not the internal lease key — "BBC One", not "live:18236".
-        var line = '  ' + (s.kind === 'live' ? '● ' : '▶ ') + (s.label || s.key);
+        var line = (s.kind === 'live' ? '● ' : '▶ ') + (s.label || s.key);
         // Live refs are genuine viewers (fan-out across devices). A file lease is keyed per device,
         // so its refs are overlapping range requests from ONE viewer seeking/buffering — call those
         // requests, not viewers, or a single person skipping ahead reads as a crowd.
         if (s.viewers > 1) line += '  (' + s.viewers + (s.kind === 'live' ? ' viewers)' : ' requests)');
         if (s.since) line += '  ' + ago(s.since);
-        st.appendChild(el('div', null, line));
+        st2.appendChild(el('div', 'row', line));
       });
-      card.appendChild(st);
+      sc.appendChild(st2);
+      pad.appendChild(sc);
     }
 
-    // The URLs a person actually needs to type into a player.
+    // URLs for a player
     var host = location.hostname;
     var base = l.port ? ('http://' + host + ':' + l.port) : (location.protocol + '//' + location.host);
     var user = l.port ? 'relay' : l.mac;
+    var uc = el('div', 'card');
+    uc.appendChild(el('div', 'sec-title', 'Player setup'));
     var urls = el('div', 'urls');
     urls.appendChild(urlRow('Server', base));
     urls.appendChild(urlRow('Username', user));
     urls.appendChild(urlRow('Password', l.password));
     urls.appendChild(urlRow('Playlist', base + '/get.php?username=' + encodeURIComponent(user) +
       '&password=' + encodeURIComponent(l.password)));
-    card.appendChild(urls);
+    uc.appendChild(urls);
+    pad.appendChild(uc);
 
+    // Actions
     var acts = el('div', 'actions');
     var edit = el('button', 'sm', 'Edit');
     edit.addEventListener('click', function () { openDialog(l); });
@@ -446,7 +661,7 @@ const PAGE = `<!DOCTYPE html>
     var rc = el('button', 'sm', 'Reconnect');
     rc.addEventListener('click', function () {
       rc.disabled = true;
-      rc.textContent = 'Reconnecting...';
+      rc.textContent = 'Reconnecting…';
       api('/api/lines/' + l.id + '/reconnect', { method: 'POST' })
         .then(function (r) { toast(r.connected ? 'Connected' : (r.error || 'Could not connect')); })
         .catch(function (e) { toast(e.message); })
@@ -465,6 +680,7 @@ const PAGE = `<!DOCTYPE html>
     acts.appendChild(rb);
 
     acts.appendChild(el('div', 'sp'));
+    acts.lastChild.style.flex = '1';
 
     var del = el('button', 'sm danger', 'Delete');
     del.addEventListener('click', function () {
@@ -474,9 +690,9 @@ const PAGE = `<!DOCTYPE html>
         .catch(function (e) { toast(e.message); });
     });
     acts.appendChild(del);
-    card.appendChild(acts);
+    pad.appendChild(acts);
 
-    return card;
+    pane.appendChild(pad);
   }
 
   function urlRow(label, value) {
@@ -580,7 +796,11 @@ const PAGE = `<!DOCTYPE html>
     var method = state.editing ? 'PUT' : 'POST';
     btn.disabled = true;
     api(path, { method: method, body: JSON.stringify(body) })
-      .then(function () { dlg.close(); toast('Saved'); refresh(); })
+      .then(function (r) {
+        // Select a newly added line so its player URLs are right there.
+        if (!state.editing && r && r.line) state.selected = r.line.id;
+        dlg.close(); toast('Saved'); refresh();
+      })
       .catch(function (e) { dlgError(e.message); })
       .then(function () { btn.disabled = false; });
   });
@@ -588,7 +808,7 @@ const PAGE = `<!DOCTYPE html>
   document.getElementById('btnTest').addEventListener('click', function () {
     var btn = this;
     btn.disabled = true;
-    btn.textContent = 'Testing...';
+    btn.textContent = 'Testing…';
     dlgError('');
     api('/api/test', { method: 'POST', body: JSON.stringify(collect()) })
       .then(function (r) { if (r.ok) dlgOk(r.message); else dlgError(r.message); })
@@ -626,7 +846,10 @@ const PAGE = `<!DOCTYPE html>
     return api('/api/lines').then(function (r) {
       state.lines = r.lines || [];
       if (r.portRange) state.portRange = r.portRange;
-      renderLines();
+      // Only the data-driven parts re-render; the shell, search box and filters stay put so typing
+      // a search or scrolling the list isn't interrupted every 5 seconds.
+      if (document.getElementById('detail')) renderData();
+      else renderApp();
     }).catch(function (e) {
       // A dropped session should return to the login screen rather than silently freezing.
       if (/signed in/i.test(e.message)) {

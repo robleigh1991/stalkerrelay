@@ -29,6 +29,11 @@ const KEEPALIVE_MS = 4 * 60 * 1000;
 // re-opening what we just closed.
 const LINGER_MS = 8000;
 
+// When the portal session drops, retry on a climbing backoff instead of hammering it. Capped so a
+// line that stays down keeps probing once a minute rather than giving up — a provider outage ends
+// on its own and the line should be back the moment it does, with no manual reconnect.
+const RECONNECT_BACKOFF = [2000, 5000, 15000, 30000, 60000];
+
 class Session {
   /**
    * @param cfg { id, name, portal, mac, timezone, lang, userAgent, maxConnections }
@@ -55,6 +60,12 @@ class Session {
     this.lastError = null;
     this.keepAlive = null;
     this._authPromise = null;
+    // Auto-recovery of a dropped portal session. `_reconnectTimer` is non-null while a retry is
+    // pending (the dashboard reads it as "reconnecting"), `_stopped` blocks the loop once the
+    // session is torn down so a fired timer can't resurrect a deleted line.
+    this._reconnectTimer = null;
+    this._reconnectTries = 0;
+    this._stopped = false;
   }
 
   /**
@@ -70,6 +81,10 @@ class Session {
         await this.client.authenticate();
         this.connected = true;
         this.lastError = null;
+        // A successful connect (eager, on-play, or from the reconnect loop) clears any pending
+        // retry and resets the backoff, so the next drop starts from the short delay again.
+        this._reconnectTries = 0;
+        if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
         this._startKeepAlive();
         log(this, 'connected');
         return true;
@@ -94,16 +109,55 @@ class Session {
     if (this.keepAlive) return;
     this.keepAlive = setInterval(() => {
       // getAccountInfo is cheap and goes through _call, which re-handshakes by itself if the portal
-      // has expired the token. Failure here is not fatal — the next real request will retry.
-      this.client.getAccountInfo().catch((e) => {
+      // has merely expired the device token. So a failure here is genuine — the portal is
+      // unreachable or the account was rejected — not ordinary token churn. Flip the status to
+      // disconnected and let the reconnect loop recover it, instead of the old behaviour of logging
+      // and leaving the line falsely green until a device happened to try playing.
+      this.client.getAccountInfo().then(() => {
+        if (!this.connected) { this.connected = true; this.lastError = null; log(this, 'keep-alive recovered'); }
+      }).catch((e) => {
         log(this, 'keep-alive failed: ' + ((e && e.message) || e));
+        this._markDisconnected((e && e.message) || String(e));
+        this._scheduleReconnect();
       });
     }, KEEPALIVE_MS);
     if (this.keepAlive.unref) this.keepAlive.unref();
   }
 
+  _markDisconnected(err) {
+    if (this.connected) log(this, 'lost connection: ' + err);
+    this.connected = false;
+    if (err) this.lastError = err;
+  }
+
+  /**
+   * Recover a dropped portal session on a backoff. Streams already running are unaffected — each
+   * rides its own Broadcast, which re-mints play tokens independently — so this only restores the
+   * shared session, which is what new plays, catalogue refreshes and the dashboard status need.
+   */
+  _scheduleReconnect() {
+    if (this._reconnectTimer || this.connected || this._stopped) return;
+    const wait = RECONNECT_BACKOFF[Math.min(this._reconnectTries, RECONNECT_BACKOFF.length - 1)];
+    log(this, 'reconnecting in ' + Math.round(wait / 1000) + 's (attempt ' + (this._reconnectTries + 1) + ')');
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      this._reconnectTries++;
+      // connect() no-ops when already connected and resets the backoff on success; on failure we
+      // queue the next attempt at the longer delay.
+      this.connect()
+        .then(() => { log(this, 'reconnected'); })
+        .catch(() => { this._scheduleReconnect(); });
+    }, wait);
+    if (this._reconnectTimer.unref) this._reconnectTimer.unref();
+  }
+
+  /** True while a reconnect is pending — the dashboard shows this as an amber "reconnecting". */
+  get reconnecting() { return !!this._reconnectTimer; }
+
   stop() {
+    this._stopped = true;
     if (this.keepAlive) { clearInterval(this.keepAlive); this.keepAlive = null; }
+    if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
     for (const lease of Array.from(this.leases.values())) this._closeLease(lease, 'session stopped');
     this.connected = false;
   }
@@ -201,6 +255,7 @@ class Session {
       portal: this.cfg.portal || '',
       mac: this.cfg.mac || '',
       connected: this.connected,
+      reconnecting: this.reconnecting,
       error: this.lastError,
       connections: this.activeConnections,
       maxConnections: this.maxConnections,

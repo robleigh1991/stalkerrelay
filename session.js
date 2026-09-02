@@ -178,6 +178,16 @@ class Session {
     key = String(key);
     let lease = this.leases.get(key);
 
+    // A Broadcast / LiveRemux can self-terminate (it gave up re-opening a dead source) while its
+    // lease still lingers with no viewers. Joining that lease would hand back the CLOSED upstream —
+    // the HLS heal re-leases into exactly this window and gets its own dead broadcast, then loops
+    // ffmpeg forever; the desktop path attaches a viewer to a stream that never re-opens. So drop a
+    // lingering-but-dead lease here and fall through to open a fresh one.
+    if (lease && lease.upstream && lease.upstream.closed) {
+      this._closeLease(lease, 'upstream already closed');
+      lease = null;
+    }
+
     if (lease) {
       lease.refs++;
       if (lease.closeTimer) { clearTimeout(lease.closeTimer); lease.closeTimer = null; }
@@ -190,7 +200,8 @@ class Session {
         try { upstream = await lease.opening; }
         catch (e) { this._release(key); throw e; }
       }
-      if (!upstream) { this._release(key); throw new Error('stream is no longer available'); }
+      // It may have closed between the truthiness check above and the await resolving.
+      if (!upstream || upstream.closed) { this._release(key); throw new Error('stream is no longer available'); }
       return { upstream: upstream, release: () => this._release(key), shared: true };
     }
 

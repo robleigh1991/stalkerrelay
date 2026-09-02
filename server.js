@@ -69,6 +69,15 @@ function applyConfig() {
   // Only the sessions pool.load actually created or reconnected — so adding or editing one line
   // connects and warms that line alone and leaves every other line's catalogue untouched.
   const started = pool.load(lines);
+  // A changed line (new portal/MAC) keeps its session id, so its cached play links would otherwise
+  // resolve to the OLD portal's edge for up to LINK_TTL_MS. Drop this line's entries so the next
+  // play mints a fresh link. Key is `<id>|<streamId>|<ep>`; the trailing '|' anchors the id segment
+  // so id "1" can't match "10|…".
+  started.forEach((s) => {
+    for (const k of Array.from(linkCache.keys())) {
+      if (k.indexOf(s.id + '|') === 0) linkCache.delete(k);
+    }
+  });
   started.forEach((s) => {
     if (!s.catalog) s.catalog = new Catalog(s);
     // Connect eagerly: the portal session is the scarce resource, so it is established once at

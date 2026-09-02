@@ -454,6 +454,14 @@ function relayFile(target, headers, req, res) {
   let resumes = 0;
   let closed = false;
 
+  // `delivered` counts from zero, but the client's first request may carry a seek (Range: bytes=N-).
+  // The absolute file offset is therefore base + delivered, and a resume MUST ask for that — asking
+  // for bytes=<delivered>- would refetch from N+delivered-worth-of-bytes-too-early and splice the
+  // wrong part of the film into the middle. base is 0 for an unranged play, so this is a no-op there.
+  let base = 0;
+  const rangeStart = /bytes=(\d+)-/i.exec((req.headers && req.headers.range) || '');
+  if (rangeStart) base = parseInt(rangeStart[1], 10) || 0;
+
   // The resolved play link is already authorized by its own play_token. Portal session headers
   // (Authorization: Bearer, Cookie) don't belong on it, and some panels 403/401/456 the /series/
   // and /movie/ play endpoints when Authorization is present — the exact reason a real player
@@ -529,7 +537,7 @@ function relayFile(target, headers, req, res) {
         }
         resumes++;
         log('file: source ' + why + ' at ' + delivered + ' — resuming (' + resumes + '/' + RESUME_MAX + ')');
-        resumeAt(delivered);
+        resumeAt(base + delivered);
       };
       up.on('end', () => finish('ended'));
       up.on('aborted', () => finish('aborted'));
@@ -563,7 +571,7 @@ function relayFile(target, headers, req, res) {
         if (resumes >= RESUME_MAX) { try { res.destroy(); } catch (e) {} return; }
         resumes++;
         log('file: source ' + why + ' at ' + delivered + ' — resuming (' + resumes + '/' + RESUME_MAX + ')');
-        resumeAt(delivered);
+        resumeAt(base + delivered);
       };
       up.on('end', () => finish('ended'));
       up.on('aborted', () => finish('aborted'));

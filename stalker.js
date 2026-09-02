@@ -53,6 +53,8 @@ class StalkerClient {
     this.cfg = Object.assign({ timezone: 'Europe/London', lang: 'en' }, cfg || {});
     this.token = null;
     this.profileLoaded = false;
+    // In-flight handshake, shared by concurrent callers (see authenticate).
+    this._authPromise = null;
 
     // Normalise portal -> base origin + api endpoint candidates
     const raw = (this.cfg.portal || '').trim().replace(/\/+$/, '');
@@ -202,13 +204,22 @@ class StalkerClient {
 
   // ---------------- Auth ----------------
   async authenticate() {
+    // Dedup concurrent handshakes. The mid-use re-handshake fires from inside _call (token-expiry
+    // retry), which Session never sees — so without a lock here, two simultaneous re-handshakes on
+    // ONE line (two devices opening different channels at once, or a play racing the keepalive) each
+    // mint a device token that invalidates the other's, and one stream dies with MAG_TOKEN_INVALID —
+    // the exact churn this relay exists to prevent. A single in-flight handshake hands both callers
+    // the same fresh token.
+    if (this._authPromise) return this._authPromise;
     this.token = null;
     // Stops the handshake's own calls from recursing back into _call's token-expiry retry.
     this._authInFlight = true;
+    this._authPromise = this._authenticate();
     try {
-      return await this._authenticate();
+      return await this._authPromise;
     } finally {
       this._authInFlight = false;
+      this._authPromise = null;
     }
   }
 

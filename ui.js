@@ -107,7 +107,7 @@ const PAGE = `<!DOCTYPE html>
 
   /* ---- detail pane ---- */
   .detail { flex: 1; overflow-y: auto; min-width: 0; }
-  .detail .pad { padding: 22px; max-width: 760px; }
+  .detail .pad { padding: 22px;}
   .detail .placeholder { color: var(--dim); text-align: center; padding: 60px 20px; }
   .dhead { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
   .dhead h2 { font-size: 20px; margin: 0; font-weight: 600; }
@@ -124,13 +124,16 @@ const PAGE = `<!DOCTYPE html>
   .kv .k { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--dim); }
   .kv .v { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; word-break: break-all; }
 
-  .urls { display: grid; gap: 6px; }
-  .urlrow { display: flex; align-items: center; gap: 8px; }
-  .urlrow .lab { font-size: 12px; color: var(--dim); min-width: 74px; }
+  .urls { display: flex; flex-direction: column; gap: 6px; }
+  .urlrow { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .urlrow .lab { font-size: 12px; color: var(--dim); min-width: 74px; flex: none; }
   .urlrow code {
-    flex: 1; font-size: 12px; background: var(--bg); padding: 5px 8px; border-radius: 6px;
+    /* min-width:0 lets this shrink below the URL's length so a long playlist link scrolls inside
+       the box instead of forcing the row wider than the card and pushing Copy past its edge. */
+    flex: 1; min-width: 0; font-size: 12px; background: var(--bg); padding: 5px 8px; border-radius: 6px;
     border: 1px solid var(--line); overflow-x: auto; white-space: nowrap;
   }
+  .urlrow button { flex: none; }
   .actions { display: flex; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
 
   .streams { font-size: 13px; color: var(--dim); }
